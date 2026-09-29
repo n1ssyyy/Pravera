@@ -1,0 +1,19 @@
+[package]
+name = "pravera-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pravera-core.workspace = true
+pravera-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

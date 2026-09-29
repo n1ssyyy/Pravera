@@ -1,0 +1,17 @@
+[package]
+name = "pravera-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pravera-core.workspace = true
+ed25519-dalek.workspace = true
+blake3.workspace = true
+argon2.workspace = true
+rand.workspace = true
+zeroize.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+data-encoding.workspace = true

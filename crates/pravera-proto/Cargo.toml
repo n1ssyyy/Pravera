@@ -1,0 +1,15 @@
+[package]
+name = "pravera-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pravera-core.workspace = true
+serde.workspace = true
+postcard.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+bitflags.workspace = true
+zeroize.workspace = true

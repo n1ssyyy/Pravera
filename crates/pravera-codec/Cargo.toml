@@ -1,0 +1,25 @@
+[package]
+name = "pravera-codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pravera-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+openh264.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Media Foundation, for the hardware H.264 encoder. Every Windows machine with
+# a GPU made this decade exposes one, and it is the difference between 26ms and
+# single-digit milliseconds on a 1080p frame.
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }

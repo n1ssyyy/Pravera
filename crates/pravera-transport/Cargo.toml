@@ -1,0 +1,17 @@
+[package]
+name = "pravera-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pravera-core.workspace = true
+pravera-proto.workspace = true
+pravera-crypto.workspace = true
+iroh.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+bytes.workspace = true

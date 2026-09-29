@@ -1,0 +1,17 @@
+[package]
+name = "pravera-discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pravera-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+if-addrs.workspace = true
+parking_lot.workspace = true
+mdns-sd = "0.21"

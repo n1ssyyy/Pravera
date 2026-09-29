@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="dev.pravera.Pravera" version="1.0.0.0" processorArchitecture="amd64"/>
+
+  <!--
+    The requested execution level is NOT here. rustc emits its own manifest
+    fragment declaring `asInvoker`, and `mt.exe` refuses to merge two fragments
+    that disagree about `level` — it is a hard link error, not a precedence
+    rule. So elevation is asked for with the linker's `/MANIFESTUAC` flag in
+    build.rs, which replaces that fragment rather than colliding with it.
+
+    Why elevated at all: input injection is subject to UIPI, and a process at
+    medium integrity cannot post so much as a mouse click to a window owned by
+    an elevated one. Without it a remote user watches their own clicks do
+    nothing the moment an admin window takes focus.
+
+    The cost is a UAC prompt on every manual launch, and it is why `autostart`
+    registers a scheduled task rather than a Run entry: Windows will not
+    elevate a Run entry at sign-in, so an elevated Pravera in the Run key would
+    simply never start.
+  -->
+
+  <!--
+    Per-monitor v2, so the window is crisp on a scaled display and the capture
+    layer sees real pixels rather than a virtualised 96 DPI surface.
+  -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+
+  <!-- Declaring Windows 10/11 support: without it the OS reports 6.2 and
+       applies compatibility shims meant for far older programs. -->
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
+      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/>
+    </application>
+  </compatibility>
+</assembly>

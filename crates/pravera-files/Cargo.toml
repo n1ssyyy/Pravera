@@ -1,0 +1,32 @@
+[package]
+name = "pravera-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pravera-core.workspace = true
+pravera-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+blake3.workspace = true
+# Only for the places view: where this machine keeps Desktop, Documents and
+# Downloads, which a client on the other end cannot possibly guess.
+directories.workspace = true
+
+[target."cfg(windows)".dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    # `browse`: which drive letters exist, and what kind each one is. The
+    # `DRIVE_*` constants live under `WindowsProgramming` rather than beside
+    # the call that returns them.
+    "Win32_Storage_FileSystem",
+    "Win32_System_WindowsProgramming",
+    # The clipboard itself, the moveable block its text lives in, and the
+    # CF_UNICODETEXT constant that names the format.
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+] }

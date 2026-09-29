@@ -1,0 +1,47 @@
+[Unit]
+# A *user* unit, not a system one, and that is the whole design.
+#
+# On Windows the service runs as LocalSystem in session 0 and launches an agent
+# into whichever session owns the console, because session 0 has no desktop.
+# Linux has no equivalent problem and no equivalent trick: a graphical session
+# is a user's session, PipeWire and the desktop portal are reached through that
+# user's bus, and a system unit running as root would be talking to nobody.
+#
+# So the unit runs as the user, and `loginctl enable-linger <user>` is what
+# makes it start at boot without anybody signing in. That one command is the
+# Linux answer to the Windows service, and it is a deliberate act by the person
+# who owns the machine rather than something Pravera arranges for them.
+Description=Pravera Remote Desktop
+Documentation=https://github.com/n1ssyyy/Pravera
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# --hidden, because this is a machine with no monitor. On the rare occasion it
+# has one, a window appearing by itself at boot is not what anybody wants.
+ExecStart=/usr/bin/pravera --hidden
+Restart=on-failure
+RestartSec=5
+
+# Pravera's own files, which is where the device key and the account hashes
+# live. Not a system path: this is the user's Pravera, and pointing it at a
+# machine-wide directory would need root and would give the machine two
+# identities.
+Environment=RUST_LOG=info
+
+# The capture and input paths need the session bus and the display. Inherited
+# rather than set, because guessing them is how a unit ends up working on one
+# desktop and failing silently on the next.
+PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_RUNTIME_DIR
+
+# Nothing here needs to write outside its own state directory, and a remote
+# desktop is exactly the kind of program worth confining.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/pravera %h/.config/pravera
+
+[Install]
+WantedBy=graphical-session.target

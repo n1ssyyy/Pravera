@@ -1,0 +1,14 @@
+[package]
+name = "pravera-term"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The VT tokenizer. Parsing escape sequences correctly is famously fiddly —
+# UTF-8 boundaries mid-sequence, OSC string terminators, parameter sub-cells —
+# and this parser is the one WezTerm and Alacritty bet on. It only tokenises:
+# what each sequence means to our grid is decided here.
+vte = "0.15"
+bitflags.workspace = true

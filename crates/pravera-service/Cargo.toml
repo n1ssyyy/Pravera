@@ -1,0 +1,27 @@
+[package]
+name = "pravera-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pravera-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+pravera-capture.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Environment",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Services",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }

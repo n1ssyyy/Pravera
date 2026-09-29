@@ -1,0 +1,18 @@
+[package]
+name = "pravera-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pravera-core.workspace = true
+pravera-crypto.workspace = true
+bitflags.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+[dev-dependencies]
+serde_json.workspace = true

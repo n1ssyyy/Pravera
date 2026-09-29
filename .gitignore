@@ -1,0 +1,16 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Local state the app writes when run from the workspace
+*.log
+*.log.1
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Working notes
+handoff.md

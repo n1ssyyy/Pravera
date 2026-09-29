@@ -1,0 +1,287 @@
+# Tests every push, and turns a `v*` tag into a release.
+#
+# One job per platform builds the single `pravera` executable, names it as
+# that platform's installer, and then proves the installer on the runner the
+# way a person would use it: `--version`, a real install into a temporary
+# folder, the installed copy's own `--version`, and an uninstall. Only the
+# installer leaves the job.
+#
+# The release carries exactly three files — one Setup per platform, nothing
+# else — because every installed Pravera finds its own update among them by
+# name (`crates/pravera-ui/src/install/mod.rs`, `ASSET`). A release with a
+# missing or misnamed file would strand every copy on that platform, so the
+# release job refuses to publish one.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            asset: Pravera-Setup-Windows-x64.exe
+          - name: Linux
+            # Pinned, and deliberately old: the glibc floor of the AppImage
+            # is the runner's (2.35), and a newer runner would quietly raise it.
+            os: ubuntu-22.04
+            asset: Pravera-Setup-Linux-x86_64.AppImage
+          - name: macOS
+            os: macos-latest
+            asset: Pravera-Setup-macOS-arm64.zip
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y pkg-config libasound2-dev libxkbcommon-dev libfuse2 file
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Resolve version
+        id: v
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='pravera-ui'))")
+          echo "app=$version" >> "$GITHUB_OUTPUT"
+          echo "Pravera $version"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $version (Cargo.toml)"
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build
+        run: cargo build --release --locked -p pravera-ui
+
+      - name: Package (Windows)
+        # The installer *is* the program: the same executable, under the name
+        # that makes it open as Setup.
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/release/pravera.exe "dist/${{ matrix.asset }}"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        env:
+          # No FUSE on the runner: appimagetool unpacks itself instead.
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: |
+          app=AppDir
+          mkdir -p "$app/usr/bin" dist
+          cp target/release/pravera "$app/usr/bin/pravera"
+          chmod +x "$app/usr/bin/pravera"
+          ln -s usr/bin/pravera "$app/AppRun"
+          "$app/usr/bin/pravera" --export-icon "$app/pravera.png" 256
+          printf '%s\n' \
+            '[Desktop Entry]' \
+            'Type=Application' \
+            'Name=Pravera' \
+            'Comment=Peer-to-peer remote desktop' \
+            'Exec=pravera' \
+            'Icon=pravera' \
+            'Terminal=false' \
+            'Categories=Network;RemoteAccess;' \
+            > "$app/pravera.desktop"
+          curl -fsSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool --no-appstream "$app" "dist/${{ matrix.asset }}"
+          chmod +x "dist/${{ matrix.asset }}"
+
+      - name: Package (macOS)
+        # `Pravera Setup.app` holds the same executable as the installed
+        # `Pravera.app`; the installer writes the installed bundle's own
+        # Info.plist. Signed ad hoc, so the seal matches what is inside.
+        if: runner.os == 'macOS'
+        env:
+          V: ${{ steps.v.outputs.app }}
+        run: |
+          app="work/Pravera Setup.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" dist
+          cp target/release/pravera "$app/Contents/MacOS/pravera"
+          chmod +x "$app/Contents/MacOS/pravera"
+
+          set=work/pravera.iconset
+          mkdir -p "$set"
+          for size in 16 32 128 256 512; do
+            "$app/Contents/MacOS/pravera" --export-icon "$set/icon_${size}x${size}.png" "$size"
+            "$app/Contents/MacOS/pravera" --export-icon "$set/icon_${size}x${size}@2x.png" "$((size * 2))"
+          done
+          iconutil -c icns "$set" -o "$app/Contents/Resources/pravera.icns"
+
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Pravera Setup</string>
+            <key>CFBundleDisplayName</key><string>Pravera Setup</string>
+            <key>CFBundleIdentifier</key><string>com.n1ssyyy.pravera.setup</string>
+            <key>CFBundleExecutable</key><string>pravera</string>
+            <key>CFBundleIconFile</key><string>pravera</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$V</string>
+            <key>CFBundleVersion</key><string>$V</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "$app/Contents/Info.plist"
+
+          codesign --force --deep --sign - "$app"
+          ditto -c -k --keepParent "$app" "dist/${{ matrix.asset }}"
+
+      - name: Install smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $v = '${{ steps.v.outputs.app }}'
+          function Run($exe, $argv) {
+            $out = Join-Path $env:RUNNER_TEMP 'out.txt'
+            $p = Start-Process -FilePath $exe -ArgumentList $argv -PassThru -NoNewWindow -RedirectStandardOutput $out
+            $null = $p.Handle
+            if (-not $p.WaitForExit(120000)) { $p.Kill(); throw "$exe $argv hung" }
+            $text = (Get-Content $out -Raw)
+            Write-Host "> $exe $argv (exit $($p.ExitCode))`n$text"
+            if ($p.ExitCode -ne 0) { throw "$exe $argv failed" }
+            return "$text".Trim()
+          }
+          $setup = Resolve-Path "dist/${{ matrix.asset }}"
+          $dir = Join-Path $env:RUNNER_TEMP 'Pravera'
+          if ((Run $setup '--version') -ne "pravera $v") { throw 'Setup reports the wrong version' }
+          Run $setup "--install --quiet --no-launch --dir `"$dir`"" | Out-Null
+          if ((Run (Join-Path $dir 'pravera.exe') '--version') -ne "pravera $v") { throw 'the installed copy reports the wrong version' }
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Pravera'
+          if (-not (Test-Path $key)) { throw 'no entry in Settings > Apps' }
+          Run $setup "--uninstall --quiet --dir `"$dir`"" | Out-Null
+          if (Test-Path (Join-Path $dir 'pravera.exe')) { throw 'uninstall left the executable' }
+          if (Test-Path $key) { throw 'uninstall left the Settings > Apps entry' }
+
+      - name: Install smoke test (Linux)
+        if: runner.os == 'Linux'
+        env:
+          # The path users without FUSE take.
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+          V: ${{ steps.v.outputs.app }}
+        run: |
+          set -euo pipefail
+          setup="$PWD/dist/${{ matrix.asset }}"
+          dir="$RUNNER_TEMP/pravera"
+          test "$("$setup" --version)" = "pravera $V"
+          "$setup" --install --quiet --no-launch --dir "$dir"
+          test "$("$dir/pravera" --version)" = "pravera $V"
+          test -f "$HOME/.local/share/applications/pravera.desktop"
+          "$setup" --uninstall --quiet --dir "$dir"
+          test ! -e "$dir/pravera"
+          test ! -e "$HOME/.local/share/applications/pravera.desktop"
+
+      - name: Install smoke test (macOS)
+        # The shipped zip, not the build tree.
+        if: runner.os == 'macOS'
+        env:
+          V: ${{ steps.v.outputs.app }}
+        run: |
+          set -euo pipefail
+          t=$(mktemp -d)
+          ditto -x -k "dist/${{ matrix.asset }}" "$t"
+          setup="$t/Pravera Setup.app/Contents/MacOS/pravera"
+          codesign --verify --deep "$t/Pravera Setup.app"
+          test "$("$setup" --version)" = "pravera $V"
+          "$setup" --install --quiet --no-launch --dir "$t/Applications"
+          app="$t/Applications/Pravera.app"
+          test "$("$app/Contents/MacOS/pravera" --version)" = "pravera $V"
+          test -f "$app/Contents/Resources/pravera.icns"
+          codesign --verify --deep "$app"
+          "$setup" --uninstall --quiet --dir "$t/Applications"
+          test ! -e "$app"
+
+      - name: Upload Setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: pravera-setup-${{ matrix.name }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    # Exactly the three Setup installers — nothing else. Every installed
+    # Pravera reads this release through the GitHub API and downloads the
+    # Setup for its own platform, checked against the digest GitHub records.
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pravera-setup-*
+          merge-multiple: true
+          path: dist
+
+      - name: Check release surface
+        run: |
+          ls -la dist/
+          expected="Pravera-Setup-Linux-x86_64.AppImage Pravera-Setup-Windows-x64.exe Pravera-Setup-macOS-arm64.zip"
+          actual=$(ls dist | LC_ALL=C sort | xargs)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::release must contain exactly the three Setup installers, got: $actual"
+            exit 1
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          make_latest: true
+          body: |
+            ## Install
+
+            Download the Setup for your system and run it. It installs for your account only — no administrator, no reboot — and Pravera keeps itself up to date from then on. Run the same Setup again later to update, repair or uninstall.
+
+            | System | Download | Notes |
+            |---|---|---|
+            | Windows 10/11 (x64) | `Pravera-Setup-Windows-x64.exe` | Not code-signed yet: on the SmartScreen prompt choose **More info → Run anyway**. |
+            | macOS 11+ (Apple Silicon) | `Pravera-Setup-macOS-arm64.zip` | Unzip, then open **Pravera Setup**. It isn't notarized yet: if macOS blocks it, go to **System Settings → Privacy & Security → Open Anyway**. |
+            | Linux (x86_64, glibc 2.35+: Ubuntu 22.04+, Fedora 36+, Debian 12+) | `Pravera-Setup-Linux-x86_64.AppImage` | `chmod +x Pravera-Setup-Linux-x86_64.AppImage && ./Pravera-Setup-Linux-x86_64.AppImage`. If it won't start (no FUSE), add `--appimage-extract-and-run`. |
+
+            Scripted installs: `--install --quiet [--dir PATH] [--desktop-shortcut] [--no-launch]`, and `--uninstall --quiet [--purge]`.

@@ -1,0 +1,20 @@
+[package]
+name = "pravera-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pravera-core.workspace = true
+pravera-proto.workspace = true
+pravera-discovery.workspace = true
+pravera-capture.workspace = true
+pravera-input.workspace = true
+pravera-files.workspace = true
+pravera-host.workspace = true
+
+tokio.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,36 @@
+[package]
+name = "pravera-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pravera-core.workspace = true
+pravera-proto.workspace = true
+pravera-auth.workspace = true
+pravera-crypto.workspace = true
+pravera-audio.workspace = true
+pravera-capture.workspace = true
+pravera-codec.workspace = true
+pravera-input.workspace = true
+pravera-files.workspace = true
+pravera-transport.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# ConPTY: the pseudoconsole behind `terminal`. The workspace pins the release
+# so every crate shares one set of bindings.
+windows = { workspace = true }
+
+[dev-dependencies]
+# The end-to-end test drives a real client against a real host. No cycle: the
+# client crate knows nothing about the host.
+pravera-client.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true

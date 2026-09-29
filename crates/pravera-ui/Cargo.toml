@@ -1,0 +1,111 @@
+[package]
+name = "pravera-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pravera-core.workspace = true
+pravera-audio.workspace = true
+pravera-client.workspace = true
+pravera-capture.workspace = true
+pravera-files.workspace = true
+pravera-codec.workspace = true
+pravera-host.workspace = true
+pravera-proto.workspace = true
+pravera-term.workspace = true
+pravera-transport.workspace = true
+pravera-discovery.workspace = true
+pravera-service.workspace = true
+pravera-auth.workspace = true
+pravera-crypto.workspace = true
+pravera-mcp.workspace = true
+anyhow.workspace = true
+# Only for `prefs`: the two choices that have to outlive the process.
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+# Matched to what iced 0.14 resolves to. The shader widget's `prepare` and
+# `draw` take wgpu types directly and iced does not re-export the crate, so it
+# has to be named here; a mismatched major would make those signatures refer to
+# two different `wgpu::Device` types.
+wgpu = "27"
+bytemuck = { version = "1", features = ["derive"] }
+# Matched to what iced 0.14 depends on. `chrome` needs the platform window
+# handle to style the frame the compositor draws, and iced hands that out as a
+# `raw_window_handle` type rather than one of its own.
+raw-window-handle = "0.6"
+iced = { version = "0.14", features = [
+    "wgpu",
+    "advanced",
+    "image",
+    "svg",
+    "canvas",
+    "tokio",
+    "lazy",
+] }
+resvg = { version = "0.44", default-features = false, features = ["text"] }
+tiny-skia = "0.11"
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Updates: the release feed is read and the new build fetched over HTTPS. The
+# same reqwest and rustls iroh already links, with the ring provider it
+# already enables and Mozilla's roots compiled in, so the updater adds no TLS
+# stack of its own and trusts nothing the operating system was talked into.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+sha2 = "0.10"
+semver = "1"
+
+[build-dependencies]
+winres = "0.1"
+resvg = { version = "0.44", default-features = false, features = ["text"] }
+tiny-skia = "0.11"
+ico = "0.4"
+
+[dev-dependencies]
+# The keyboard table in `net::keys` and the scan-code table in `pravera-input`
+# describe the same keys from opposite ends. A test asserts they agree, which
+# is the only reason the client links the host's input crate at all.
+pravera-input.workspace = true
+
+[lib]
+name = "pravera_ui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pravera"
+path = "src/main.rs"
+# No test harness for the executable. It has three lines and none of them are
+# testable, and the harness Cargo would build inherits this target's linker
+# arguments — including the manifest demanding elevation, which makes it an
+# executable `cargo test` is not allowed to launch. Everything worth testing is
+# in the library, which has no such manifest.
+test = false
+
+[target."cfg(windows)".dependencies]
+tray-icon = { version = "0.24.2", default-features = false }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    # `chrome`: the rounded corner, the dark frame and the border colour.
+    "Win32_Graphics_Dwm",
+    # `autostart` removes the sign-in entry left behind by a version that used
+    # one instead of a scheduled task.
+    "Win32_System_Registry",
+    # `net::grab` and `net::pointer` install low-level hooks, and gaming mode
+    # confines the cursor with `ClipCursor`.
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    # `install`: Start menu and desktop shortcuts are COM `IShellLink`s, and
+    # the folders they go in are known folders rather than guessed paths.
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    # `--version` and the quiet installer print to the console they were
+    # started from, which a windowed executable has to ask for.
+    "Win32_System_Console",
+] }

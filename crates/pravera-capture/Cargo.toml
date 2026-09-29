@@ -1,0 +1,49 @@
+[package]
+name = "pravera-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pravera-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+# `idd`: validating the driver's `vdd_settings.xml` before it reads it. The
+# driver parses with `stoi` and no error handling, so a malformed file either
+# yields a monitor with no modes or crashes the driver host.
+roxmltree.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-capture.workspace = true
+windows = { workspace = true, features = [
+    "Foundation",
+    "Win32_Foundation",
+    # `idd`: driver-store detection, and creating/restarting the driver's
+    # root device node through SetupAPI when a headless machine needs the
+    # virtual display.
+    "Win32_Devices_DeviceAndDriverInstallation",
+    # `win32::monitors`: which monitor sits behind each display (DisplayConfig
+    # target device paths), so the virtual display and Windows' no-monitor
+    # placeholder can be told apart from a real screen.
+    "Win32_Devices_Display",
+    # `idd`: trusting the driver catalogue's signer so the first install is
+    # silent instead of waiting on a "trust this publisher?" prompt.
+    "Win32_Security_Cryptography",
+    # `idd`: the driver's own `VDDPATH` setting for where it reads its XML.
+    "Win32_System_Registry",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Gdi",
+    # `idd`: elevation probe so a headless `asInvoker` process reports
+    # "run once as administrator" instead of failing `pnputil`/SetupAPI
+    # with a cryptic code.
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }

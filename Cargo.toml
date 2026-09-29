@@ -1,0 +1,102 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version    = "0.1.0"
+edition    = "2021"
+license    = "MIT OR Apache-2.0"
+repository = "https://github.com/n1ssyyy/Pravera"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# --- internal ---
+pravera-core      = { path = "crates/pravera-core" }
+pravera-proto     = { path = "crates/pravera-proto" }
+pravera-crypto    = { path = "crates/pravera-crypto" }
+pravera-auth      = { path = "crates/pravera-auth" }
+pravera-transport = { path = "crates/pravera-transport" }
+pravera-discovery = { path = "crates/pravera-discovery" }
+pravera-service   = { path = "crates/pravera-service" }
+pravera-capture   = { path = "crates/pravera-capture" }
+pravera-codec     = { path = "crates/pravera-codec" }
+pravera-input     = { path = "crates/pravera-input" }
+pravera-audio     = { path = "crates/pravera-audio" }
+pravera-files     = { path = "crates/pravera-files" }
+pravera-host      = { path = "crates/pravera-host" }
+pravera-client    = { path = "crates/pravera-client" }
+pravera-term      = { path = "crates/pravera-term" }
+pravera-mcp       = { path = "crates/pravera-mcp" }
+
+# --- runtime / async ---
+tokio        = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "process", "fs"] }
+tokio-util   = "0.7"
+futures-lite = "2"
+
+# --- transport ---
+iroh = "1.0"
+
+# --- serialization ---
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard   = { version = "1", features = ["alloc"] }
+bytes      = "1"
+
+# --- crypto ---
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+blake3        = "1"
+argon2        = "0.5"
+rand          = "0.8"
+zeroize       = { version = "1", features = ["derive"] }
+data-encoding = "2"
+
+# --- errors / logging ---
+thiserror          = "2"
+anyhow             = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# --- codecs ---
+# Software H.264. Built from the bundled BSD-2-Clause sources rather than
+# loaded from a Cisco binary, so there is nothing to ship alongside the exe.
+openh264 = "0.9.8"
+
+# --- capture / platform ---
+# Windows Graphics Capture. Pinned to the same `windows` release it uses, so
+# feature unification produces one copy of the bindings rather than two.
+windows-capture = "2.0.1"
+windows         = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    # ConPTY: the host's remote shell.
+    "Win32_System_Console",
+    "Win32_System_Pipes",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Services",
+    "Win32_System_IO",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# --- misc ---
+bitflags    = { version = "2", features = ["serde"] }
+parking_lot = "0.12"
+roxmltree   = "0.20"
+if-addrs    = "0.15"
+directories = "5"
+
+# The stock renderer configures the window surface RENDER_ATTACHMENT-only, so
+# the live frame can never be sampled and a CSS-style backdrop-filter is
+# impossible. The vendored copy adds TEXTURE_BINDING (one line, flagged) so the
+# backdrop widget can blur the frame behind a dialog on the GPU, per frame.
+[patch.crates-io]
+iced_wgpu = { path = "third_party/iced_wgpu" }
