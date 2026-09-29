@@ -267,6 +267,17 @@ mod windows {
 mod tests {
     use super::*;
 
+    /// The machine has one clipboard and the test harness runs tests side by
+    /// side: every test that touches it takes this first, or one test's write
+    /// lands between another's two reads.
+    #[cfg(windows)]
+    static REAL_CLIPBOARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(windows)]
+    fn hold_the_clipboard() -> std::sync::MutexGuard<'static, ()> {
+        REAL_CLIPBOARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn nothing_is_not_worth_sending() {
         assert!(!carriable(""));
@@ -291,6 +302,7 @@ mod tests {
         // Touches the machine's actual clipboard, which is why it restores what
         // it found: a test that eats somebody's copied text while they are
         // working is a test that will be deleted rather than fixed.
+        let _held = hold_the_clipboard();
         let mut clipboard = match open() {
             Ok(clipboard) => clipboard,
             // A session with no window station — a build agent — has no
@@ -322,6 +334,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn asking_where_the_clipboard_has_got_to_does_not_change_it() {
+        let _held = hold_the_clipboard();
         let Ok(clipboard) = open() else { return };
         let Ok(first) = clipboard.seq() else { return };
         let Ok(second) = clipboard.seq() else { return };
