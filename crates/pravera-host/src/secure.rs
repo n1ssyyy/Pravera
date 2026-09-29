@@ -46,7 +46,7 @@ fn send_sas_windows() -> Result<(), String> {
         let func: Option<unsafe extern "system" fn(bool)> = std::mem::transmute(addr);
         let Some(send_sas) = func else {
             return Err(
-                "sas.dll does not export SendSAS — this Windows build may not support Software SAS"
+                "sas.dll does not export SendSAS; this Windows build may not support Software SAS"
                     .into(),
             );
         };

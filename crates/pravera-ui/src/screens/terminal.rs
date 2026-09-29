@@ -430,6 +430,10 @@ pub fn view<'a>(state: &'a State) -> Element<'a, Message> {
 fn ended_banner<'a>(how: Ended) -> Element<'a, Message> {
     let (tint, words) = match how {
         Ended::Exited(0) => (t::MUTED_FOREGROUND, "The shell exited.".to_string()),
+        // Negative codes never come from a shell: the host tore the console
+        // down, and a made-up exit code would send someone hunting in the
+        // wrong place.
+        Ended::Exited(code) if code < 0 => (t::WARNING, "The host closed the terminal.".to_string()),
         Ended::Exited(code) => (t::WARNING, format!("The shell exited with code {code}.")),
         Ended::Closed => (t::DESTRUCTIVE_TEXT, "The connection closed.".to_string()),
     };
@@ -437,10 +441,13 @@ fn ended_banner<'a>(how: Ended) -> Element<'a, Message> {
         row![
             components::dot(tint, 6.0),
             text(words).size(t::TEXT_XS).style(theme::muted).width(Length::Fill),
-            iced::widget::button(text("Close tab").size(t::TEXT_XS).font(t::FONT_UI_MEDIUM))
-                .padding(components::BUTTON_PADDING_SM)
-                .style(theme::secondary_button)
-                .on_press(Message::Close),
+            components::glide(|hover| {
+                iced::widget::button(text("Close tab").size(t::TEXT_XS).font(t::FONT_UI_MEDIUM))
+                    .padding(components::BUTTON_PADDING_SM)
+                    .style(theme::gliding(hover, theme::secondary_button))
+                    .on_press(Message::Close)
+                    .into()
+            }),
         ]
         .spacing(t::SPACE_2)
         .align_y(Alignment::Center),

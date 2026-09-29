@@ -137,7 +137,7 @@ fn send_sas_windows() -> Result<(), String> {
             // leak the handle — the service lives for the machine's uptime and
             // calling SendSAS twice is rare.
             return Err(
-                "sas.dll does not export SendSAS — this Windows build may not support Software SAS"
+                "sas.dll does not export SendSAS; this Windows build may not support Software SAS"
                     .into(),
             );
         };

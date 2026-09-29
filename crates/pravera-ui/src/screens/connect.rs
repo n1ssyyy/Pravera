@@ -148,6 +148,10 @@ pub struct State {
     /// The last failure, in the words shown to the person.
     error: Option<String>,
     hover: HoverTracker,
+    /// The tiles under the chosen picture profile and the chosen sound
+    /// setting.
+    profile_thumb: motion::Thumb,
+    sound_thumb: motion::Thumb,
 }
 
 impl Default for State {
@@ -166,7 +170,26 @@ impl Default for State {
             connecting: false,
             error: None,
             hover: HoverTracker::new(HOVER_SLOTS),
+            profile_thumb: motion::Thumb::at(profile_index(QualityProfile::Adaptive)),
+            sound_thumb: motion::Thumb::at(sound_index(pravera_audio::can_play())),
         }
+    }
+}
+
+/// Where a profile's segment is in the picture control.
+fn profile_index(profile: QualityProfile) -> usize {
+    QualityProfile::ALL
+        .iter()
+        .position(|&candidate| candidate == profile)
+        .unwrap_or(0)
+}
+
+/// Where a sound setting's segment is in the sound control: hearing first.
+fn sound_index(audio: bool) -> usize {
+    if audio {
+        0
+    } else {
+        1
     }
 }
 
@@ -191,6 +214,7 @@ impl State {
     /// Restore what was chosen last time.
     pub fn set_audio(&mut self, audio: bool) {
         self.audio = audio;
+        self.sound_thumb.snap(sound_index(audio));
     }
 
     /// Brings the dialog in. Idempotent while it is already open, so a second
@@ -200,7 +224,7 @@ impl State {
         if !self.open {
             self.open = true;
             self.shown.enter(now, motion::DIALOG_IN);
-            self.scrim.go(1.0, now, std::time::Duration::from_millis(200), motion::EASE_CHANGE);
+            self.scrim.go(1.0, now, motion::DIALOG_IN, motion::EASE_CHANGE);
         }
     }
 
@@ -347,6 +371,9 @@ impl State {
     }
 
     pub fn is_animating(&self, now: Instant) -> bool {
+        if self.profile_thumb.is_animating(now) || self.sound_thumb.is_animating(now) {
+            return true;
+        }
         self.hover.is_animating(now) || self.shown.is_animating(now) || self.scrim.is_animating(now)
     }
 
@@ -391,10 +418,12 @@ pub fn update(state: &mut State, message: Message, now: Instant) -> Outcome {
         }
         Message::Profile(profile) => {
             state.profile = profile;
+            state.profile_thumb.select(profile_index(profile), now);
             Outcome::Nothing
         }
         Message::Sound(audio) => {
             state.audio = audio;
+            state.sound_thumb.select(sound_index(audio), now);
             Outcome::Nothing
         }
         Message::Hover(slot, entering) => {
@@ -502,16 +531,21 @@ fn body<'a>(state: &'a State, look: Look, now: Instant) -> Element<'a, Message> 
             .into()
     };
 
-    let close = button(
-        container(icon::stroked(icon::CLOSE, 12.0, look.c(t::MUTED_FOREGROUND)))
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
-    )
-    .width(Length::Fixed(24.0))
-    .height(Length::Fixed(24.0))
-    .padding(0)
-    .style(move |theme, status| fade_button(theme::ghost_button(theme, status), look))
-    .on_press_maybe((!state.connecting).then_some(Message::Dismiss));
+    let close = components::glide(|hover| {
+        button(
+            container(icon::stroked(icon::CLOSE, 12.0, look.c(t::MUTED_FOREGROUND)))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        )
+        .width(Length::Fixed(24.0))
+        .height(Length::Fixed(24.0))
+        .padding(0)
+        .style(move |theme, status| {
+            fade_button(theme::glided(theme::ghost_button, hover.get(), theme, status), look)
+        })
+        .on_press_maybe((!state.connecting).then_some(Message::Dismiss))
+        .into()
+    });
 
     let header = row![
         avatar,
@@ -733,7 +767,8 @@ fn profiles<'a>(state: &'a State, look: Look, now: Instant) -> Element<'a, Messa
         .map(|(index, (profile, name, _))| {
             segment(
                 name,
-                *profile == state.profile,
+                state.profile_thumb.amount(index, now),
+                state.profile_thumb.chosen() == index,
                 state.hover.amount(index, now),
                 index,
                 Message::Profile(*profile),
@@ -745,7 +780,7 @@ fn profiles<'a>(state: &'a State, look: Look, now: Instant) -> Element<'a, Messa
     labelled(
         "Picture",
         column![
-            segmented(cells, look),
+            segmented(cells, state.profile_thumb.position(now), look),
             text(blurb).size(t::TEXT_XS).style(look.text(t::SUBTLE_FOREGROUND)),
         ]
         .spacing(t::SPACE_1_5)
@@ -772,14 +807,15 @@ fn sound<'a>(state: &'a State, look: Look, now: Instant) -> Element<'a, Message>
         );
     }
 
-    let on = state.audio;
+    let thumb = &state.sound_thumb;
     labelled(
         "Sound",
         segmented(
             vec![
                 segment(
                     "Hear the host",
-                    on,
+                    thumb.amount(0, now),
+                    thumb.chosen() == 0,
                     state.hover.amount(SLOT_SOUND, now),
                     SLOT_SOUND,
                     Message::Sound(true),
@@ -787,13 +823,15 @@ fn sound<'a>(state: &'a State, look: Look, now: Instant) -> Element<'a, Message>
                 ),
                 segment(
                     "Silent",
-                    !on,
+                    thumb.amount(1, now),
+                    thumb.chosen() == 1,
                     state.hover.amount(SLOT_SOUND + 1, now),
                     SLOT_SOUND + 1,
                     Message::Sound(false),
                     look,
                 ),
             ],
+            thumb.position(now),
             look,
         ),
         look,
@@ -813,36 +851,59 @@ fn labelled<'a>(label: &'a str, body: Element<'a, Message>, look: Look) -> Eleme
     .into()
 }
 
-/// DigiClip's segmented control: a bevelled well, the chosen cell lifted.
-fn segmented<'a>(cells: Vec<Element<'a, Message>>, look: Look) -> Element<'a, Message> {
-    components::panel(row(cells).spacing(2.0).width(Length::Fill))
-        .edge(t::BEVEL_RAISED)
-        .fill(t::BACKGROUND)
-        .padding(2.0)
-        .width(Length::Fill)
-        .opacity(look.alpha)
-        .into()
+/// DigiClip's segmented control: a bevelled well, the chosen cell lifted. The
+/// lift is one tile that slides to `position`, in cells from the first, under
+/// the cells' words.
+fn segmented<'a>(cells: Vec<Element<'a, Message>>, position: f32, look: Look) -> Element<'a, Message> {
+    let count = cells.len();
+    let cells = row(cells.into_iter().map(|cell| {
+        container(cell)
+            .padding([0.0, 1.0])
+            .width(Length::Fill)
+            .into()
+    }))
+    .width(Length::Fill);
+    let tile = components::thumb_layer(position, count, move |_| container::Style {
+        background: Some(Background::Color(look.c(t::SECONDARY))),
+        border: Border {
+            radius: (t::RADIUS - 2.0).into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    });
+    components::panel(
+        iced::widget::Stack::with_children([Element::from(cells)])
+            .push_under(tile)
+            .width(Length::Fill),
+    )
+    .edge(t::BEVEL_RAISED)
+    .fill(t::BACKGROUND)
+    .padding(2.0)
+    .width(Length::Fill)
+    .opacity(look.alpha)
+    .into()
 }
 
-/// One cell of a segmented control.
+/// One cell of a segmented control. `held` is how much of the sliding tile is
+/// under it, and `active` whether it is the one chosen.
 fn segment<'a>(
     name: &'a str,
+    held: f32,
     active: bool,
     hover: f32,
     slot: usize,
     message: Message,
     look: Look,
 ) -> Element<'a, Message> {
-    let background = if active {
-        t::SECONDARY
-    } else {
-        t::with_alpha(t::NEUTRAL_825, hover)
-    };
-    let foreground = if active {
-        t::FOREGROUND
-    } else {
-        theme::blend(t::MUTED_FOREGROUND, t::FOREGROUND, hover)
-    };
+    // The tile under the chosen cell is drawn by the control, not by the
+    // cell, so a cell only ever tints itself for the pointer, and only where
+    // the tile is not.
+    let background = t::with_alpha(t::NEUTRAL_825, hover * (1.0 - held));
+    let foreground = theme::blend(
+        theme::blend(t::MUTED_FOREGROUND, t::FOREGROUND, hover),
+        t::FOREGROUND,
+        held,
+    );
 
     mouse_area(
         button(

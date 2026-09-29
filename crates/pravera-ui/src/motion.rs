@@ -1,22 +1,31 @@
 //! Motion vocabulary.
 //!
-//! DigiClip's timings, which OpenCode's desktop app independently agrees with:
+//! Every duration, distance and curve the interface moves with. The constants
+//! below are the source of truth; `DESIGN.md` restates them for people.
 //!
-//! | What | Duration | Curve |
-//! |---|---|---|
-//! | hover, press, focus | 120–150 ms | ease-out |
-//! | a panel rising into place | 320 ms, staggered 40/110/180/250 ms | enter |
-//! | a page arriving | 300 ms from 26 px | enter |
-//! | a page leaving | 160 ms, drifting 14 px | exit |
-//! | a dialog arriving | 220 ms from 97 % and 3 px | enter |
-//! | a dialog leaving | 180 ms | exit |
-//! | the scrim | 200 ms in, 180 ms out | |
+//! | What | Constant | Value | Curve |
+//! |---|---|---|---|
+//! | hover, press, focus | [`MICRO`] | 120 ms | ease-out-quart |
+//! | a value moving between two resting states | [`STANDARD`] | 200 ms | ease-out-cubic |
+//! | a page's contents leaving | [`PAGE_OUT`] | 120 ms, no travel | exit |
+//! | a page's contents arriving | [`ENTRANCE`] | 320 ms, from [`PAGE_RISE`] 6 px | enter |
+//! | the stagger between a page's blocks | [`STAGGER_STEP`] | 22 ms, capped at [`STAGGER_MAX`] 220 ms | |
+//! | the rail's highlight sliding | [`STANDARD`] | to the active item | ease-out-cubic |
+//! | a segmented control's thumb sliding | [`STANDARD`] | to the chosen segment | ease-out-cubic |
+//! | a dialog arriving | [`DIALOG_IN`] | 320 ms, from 97 % and transparent | enter |
+//! | a dialog leaving | [`DIALOG_OUT`] | 120 ms | exit |
+//! | the scrim | with its dialog | in and out together | enter / exit |
+//! | a menu arriving | [`MENU_IN`] | 220 ms, from 97 % | enter |
+//! | a menu leaving | [`MENU_OUT`] | 120 ms | exit |
 //!
 //! "Enter" is `cubic-bezier(0.22, 1, 0.36, 1)` — which is exactly the curve
 //! known as ease-out-quint — so arrivals cover most of their distance before
 //! the eye has settled and then land softly. "Exit" accelerates away: a thing
 //! that is leaving should not linger, and easing out of view looks like it is
 //! reluctant to go.
+//!
+//! The page's sheet is chrome and never moves: only what is on it changes,
+//! the old contents fading out and the new ones rising in behind them.
 //!
 //! ## Reactive rendering
 //!
@@ -52,24 +61,27 @@ pub const MICRO: Duration = Duration::from_millis(120);
 pub const STANDARD: Duration = Duration::from_millis(200);
 /// Something arriving on screen: a panel rising into place.
 pub const ENTRANCE: Duration = Duration::from_millis(320);
-/// A page arriving.
-pub const PAGE_IN: Duration = Duration::from_millis(300);
-/// A page leaving. Deliberately shorter than arriving: nobody is waiting to
-/// watch the old page go.
-pub const PAGE_OUT: Duration = Duration::from_millis(160);
-/// A dialog or menu arriving.
-pub const DIALOG_IN: Duration = Duration::from_millis(220);
-/// A dialog leaving.
-pub const DIALOG_OUT: Duration = Duration::from_millis(180);
-/// A menu leaving: quicker again, because it was only ever a glance.
-pub const MENU_OUT: Duration = Duration::from_millis(130);
+/// A page's contents leaving: a fade and nothing else, as quick as pointer
+/// feedback, because nobody is waiting to watch the old page go. Arriving is
+/// [`ENTRANCE`].
+pub const PAGE_OUT: Duration = MICRO;
+/// A dialog arriving, and the scrim behind it: the same as anything else
+/// that comes on screen.
+pub const DIALOG_IN: Duration = ENTRANCE;
+/// A dialog leaving, and the scrim with it: as quick as pointer feedback,
+/// because a dialog that has been answered should not linger.
+pub const DIALOG_OUT: Duration = MICRO;
+/// A menu arriving. Shorter than a dialog: it was only ever a glance.
+pub const MENU_IN: Duration = Duration::from_millis(220);
+/// A menu leaving.
+pub const MENU_OUT: Duration = MICRO;
 /// A toast arriving or leaving.
 pub const TOAST: Duration = Duration::from_millis(260);
 
-/// How far a page travels when it arrives, and when it leaves.
-pub const PAGE_RISE: f32 = 26.0;
-pub const PAGE_DRIFT: f32 = 14.0;
-/// How far a panel or row rises.
+/// How far a page's header and blocks rise as they arrive. Leaving does not
+/// travel at all.
+pub const PAGE_RISE: f32 = 6.0;
+/// How far the rail rises when it arrives with the shell.
 pub const PANEL_RISE: f32 = 10.0;
 /// A dialog's arrival: from this scale and this far below.
 pub const DIALOG_SCALE: f32 = 0.97;
@@ -85,17 +97,19 @@ pub const EASE_CHANGE: Easing = Easing::EaseOutCubic;
 /// that a fast sweep across several items does not leave a comet trail.
 pub const EASE_MICRO: Easing = Easing::EaseOutQuart;
 
-/// DigiClip's panel cascade: the first panel waits 40 ms, then each one
-/// 70 ms more, and the whole thing is done inside a quarter of a second.
-pub const STAGGER_FIRST: Duration = Duration::from_millis(40);
-pub const STAGGER_STEP: Duration = Duration::from_millis(70);
-/// Ceiling on accumulated stagger, so a long list never feels slow.
-pub const STAGGER_MAX: Duration = Duration::from_millis(250);
+/// The beat between one block of a page arriving and the next: the header
+/// first, then each block of the body 22 ms after the one above it, and the
+/// rows of a list the same again.
+pub const STAGGER_STEP: Duration = Duration::from_millis(22);
+/// Ceiling on accumulated stagger, so a long list is still one arrival rather
+/// than a queue.
+pub const STAGGER_MAX: Duration = Duration::from_millis(220);
 
 /// The delay for the item at `index` in a staggered sequence.
 pub fn stagger(index: usize) -> Duration {
-    let raw = STAGGER_FIRST + STAGGER_STEP.saturating_mul(index.min(u32::MAX as usize) as u32);
-    raw.min(STAGGER_MAX)
+    STAGGER_STEP
+        .saturating_mul(index.min(u32::MAX as usize) as u32)
+        .min(STAGGER_MAX)
 }
 
 /// How far into its entrance the panel at `index` is, for a page that began
@@ -117,9 +131,17 @@ pub fn cascade(since: Instant, now: Instant, index: usize) -> f32 {
     }
 }
 
-/// Whether a cascade that began at `since` is still moving at `now`.
+/// Whether a cascade that began at `since` is still moving at `now`. Counts the
+/// rows of a list inside a panel, which start after the panel does.
 pub fn cascading(since: Instant, now: Instant) -> bool {
-    now < since + STAGGER_MAX + ENTRANCE
+    now < since + STAGGER_MAX + STAGGER_MAX + ENTRANCE
+}
+
+/// How far into its entrance the row at `index` of a list is. The list itself
+/// arrives at `panel` in the page's cascade, and its rows follow it, each
+/// [`STAGGER_STEP`] after the last.
+pub fn row_cascade(since: Instant, now: Instant, panel: usize, index: usize) -> f32 {
+    cascade(since + stagger(index), now, panel)
 }
 
 /// A boolean animation on the micro tier: hover and press states.
@@ -254,6 +276,12 @@ pub fn rise<'a, Message: 'a>(content: impl Into<Element<'a, Message>>, amount: f
     rise_on(content, amount, PANEL_RISE, t::BACKGROUND)
 }
 
+/// The same for something inside a page's sheet, which fades over the sheet's
+/// colour rather than the window floor's, and rises [`PAGE_RISE`].
+pub fn settle<'a, Message: 'a>(content: impl Into<Element<'a, Message>>, amount: f32) -> Element<'a, Message> {
+    rise_on(content, amount, PAGE_RISE, t::CARD)
+}
+
 /// The same over a specific surface, and by a specific distance. Negative
 /// distances arrive from above.
 pub fn rise_on<'a, Message: 'a>(
@@ -284,6 +312,65 @@ pub fn pop<'a, Message: 'a>(content: impl Into<Element<'a, Message>>, amount: f3
         .offset(Vector::new(0.0, DIALOG_RISE * (1.0 - amount)))
         .scale(DIALOG_SCALE + (1.0 - DIALOG_SCALE) * amount)
         .into()
+}
+
+/// The chosen segment of a segmented control, and the thumb sliding to it.
+///
+/// Each screen keeps one for each control it draws and tells it when the
+/// choice moves. `position` is a fractional segment index, so a slide that is
+/// interrupted carries on from where the thumb is drawn, and each segment's
+/// label can be tinted by how much of the thumb is under it.
+#[derive(Debug, Clone, Copy)]
+pub struct Thumb {
+    at: Tween,
+    chosen: usize,
+}
+
+impl Thumb {
+    /// Resting under segment `chosen`.
+    pub fn at(chosen: usize) -> Self {
+        Thumb {
+            at: Tween::at(chosen as f32),
+            chosen,
+        }
+    }
+
+    /// Slides to segment `index` over [`STANDARD`], from where it is drawn.
+    /// Choosing what is already chosen does nothing.
+    pub fn select(&mut self, index: usize, now: Instant) {
+        if index != self.chosen {
+            self.chosen = index;
+            self.at.go(index as f32, now, STANDARD, EASE_CHANGE);
+        }
+    }
+
+    /// Jumps to segment `index` with no slide: for a control whose contents
+    /// were replaced rather than changed.
+    pub fn snap(&mut self, index: usize) {
+        self.chosen = index;
+        self.at.snap(index as f32);
+    }
+
+    /// The segment chosen, which the thumb is on or heading for.
+    pub fn chosen(&self) -> usize {
+        self.chosen
+    }
+
+    /// Where the thumb is, in segments from the first: 1.5 is half way between
+    /// the second and the third.
+    pub fn position(&self, now: Instant) -> f32 {
+        self.at.value(now)
+    }
+
+    /// How much of the thumb is under segment `index`, from 0 to 1: the share
+    /// its label is lit by.
+    pub fn amount(&self, index: usize, now: Instant) -> f32 {
+        (1.0 - (self.position(now) - index as f32).abs()).clamp(0.0, 1.0)
+    }
+
+    pub fn is_animating(&self, now: Instant) -> bool {
+        self.at.is_animating(now)
+    }
 }
 
 /// Tracks which one of a row of sibling widgets the pointer is over, and
@@ -543,9 +630,10 @@ mod tests {
 
     #[test]
     fn leaving_is_quicker_than_arriving() {
-        assert!(PAGE_OUT < PAGE_IN);
+        assert!(PAGE_OUT < ENTRANCE);
         assert!(DIALOG_OUT < DIALOG_IN);
-        assert!(MENU_OUT < DIALOG_OUT);
+        assert!(MENU_OUT < MENU_IN);
+        assert!(MENU_IN <= DIALOG_IN);
     }
 
     #[test]
@@ -555,18 +643,28 @@ mod tests {
     }
 
     #[test]
-    fn the_stagger_follows_digiclips_cascade_and_stops() {
-        assert_eq!(stagger(0), Duration::from_millis(40));
-        assert_eq!(stagger(1), Duration::from_millis(110));
-        assert_eq!(stagger(2), Duration::from_millis(180));
-        assert_eq!(stagger(3), Duration::from_millis(250));
+    fn the_stagger_is_a_short_beat_and_stops() {
+        assert_eq!(stagger(0), Duration::ZERO);
+        assert_eq!(stagger(1), Duration::from_millis(22));
+        assert_eq!(stagger(2), Duration::from_millis(44));
+        assert_eq!(stagger(10), STAGGER_MAX);
         assert_eq!(stagger(1_000), STAGGER_MAX);
         assert_eq!(stagger(usize::MAX), STAGGER_MAX);
     }
 
     #[test]
-    fn a_whole_cascade_lands_inside_six_hundred_milliseconds() {
-        assert!(ENTRANCE + STAGGER_MAX <= Duration::from_millis(600));
+    fn a_page_is_fully_in_before_a_second_has_gone() {
+        // The header, a body block and a row far down a long list: the last
+        // waits the most of everything and is still done inside a second.
+        assert!(STAGGER_MAX + STAGGER_MAX + ENTRANCE <= Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn a_page_leaves_by_fading_alone() {
+        // The leave is a pure fade: there is no distance for it to travel, and
+        // it is over before a person could be waiting on it.
+        assert!(PAGE_OUT <= Duration::from_millis(150));
+        assert!(PAGE_RISE <= 8.0, "a rise of a few pixels, not a slide");
     }
 
     #[test]
@@ -608,7 +706,79 @@ mod tests {
         let mid = since + Duration::from_millis(200);
         assert!(cascade(since, mid, 0) >= cascade(since, mid, 1));
         assert!(cascading(since, mid));
-        assert!(!cascading(since, since + STAGGER_MAX + ENTRANCE));
+        // The rows of a list inside a panel start after the panel does, so the
+        // cascade is over only once the last of them has landed.
+        assert!(cascading(since, since + STAGGER_MAX + ENTRANCE));
+        assert!(!cascading(since, since + STAGGER_MAX + STAGGER_MAX + ENTRANCE));
+    }
+
+    #[test]
+    fn the_rows_of_a_list_follow_each_other_by_a_beat_and_stop_at_the_cap() {
+        let since = Instant::now();
+        let at = since + stagger(1) + STAGGER_STEP + ENTRANCE / 3;
+        assert!(row_cascade(since, at, 1, 0) > row_cascade(since, at, 1, 1));
+        assert!(row_cascade(since, at, 1, 1) > row_cascade(since, at, 1, 2));
+        // Past the cap every row starts together, so a long list is still one
+        // arrival and not a queue.
+        let last = STAGGER_MAX.as_millis() / STAGGER_STEP.as_millis();
+        let capped = last as usize + 5;
+        assert_eq!(row_cascade(since, at, 1, last as usize), row_cascade(since, at, 1, capped));
+        // And every row has landed by the time the cascade reports being done.
+        let done = since + STAGGER_MAX + STAGGER_MAX + ENTRANCE;
+        assert_eq!(row_cascade(since, done, 5, 99), 1.0);
+    }
+
+    #[test]
+    fn a_thumb_slides_to_the_chosen_segment_over_the_standard_tier() {
+        let now = Instant::now();
+        let mut thumb = Thumb::at(0);
+        assert_eq!(thumb.position(now), 0.0);
+        assert!(!thumb.is_animating(now));
+
+        thumb.select(2, now);
+        assert_eq!(thumb.chosen(), 2);
+        assert!(thumb.is_animating(now));
+        assert_eq!(thumb.position(now), 0.0, "it sets off from where it was");
+        let part = thumb.position(now + STANDARD / 4);
+        assert!(part > 0.0 && part < 2.0, "{part}");
+        assert_eq!(thumb.position(now + STANDARD), 2.0);
+        assert!(!thumb.is_animating(now + STANDARD));
+    }
+
+    #[test]
+    fn a_thumb_chosen_again_or_snapped_does_not_slide() {
+        let now = Instant::now();
+        let mut thumb = Thumb::at(1);
+        thumb.select(1, now);
+        assert!(!thumb.is_animating(now));
+        thumb.snap(2);
+        assert_eq!(thumb.position(now), 2.0);
+        assert!(!thumb.is_animating(now));
+    }
+
+    #[test]
+    fn a_thumb_reversed_mid_slide_carries_on_from_where_it_is_drawn() {
+        let now = Instant::now();
+        let mut thumb = Thumb::at(0);
+        thumb.select(2, now);
+        let halfway = now + STANDARD / 2;
+        let drawn = thumb.position(halfway);
+        thumb.select(0, halfway);
+        assert!((thumb.position(halfway) - drawn).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_shares_of_the_thumb_under_neighbouring_segments_add_up_to_one() {
+        let now = Instant::now();
+        let mut thumb = Thumb::at(0);
+        thumb.select(1, now);
+        for step in 0..=10 {
+            let at = now + STANDARD * step / 10;
+            let (a, b) = (thumb.amount(0, at), thumb.amount(1, at));
+            assert!((a + b - 1.0).abs() < 1e-5, "{a} + {b}");
+            assert_eq!(thumb.amount(2, at), 0.0);
+        }
+        assert_eq!(thumb.amount(1, now + STANDARD), 1.0);
     }
 
     #[test]

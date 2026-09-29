@@ -333,10 +333,53 @@ pub struct Report {
     pub warnings: Vec<String>,
 }
 
+/// The stretch of work an install or an uninstall is on, as it starts it, so
+/// the installer window can show the real step rather than a timer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Phase {
+    /// Asking a running Pravera to quit, and waiting for it (up to 15 s).
+    Closing,
+    /// Putting the program in place.
+    Copying,
+    /// Shortcuts, the applications list, the menu entry.
+    Integrating,
+    /// Starting the installed copy.
+    Opening,
+    /// Removing the start-at-sign-in entry and the service.
+    Unregistering,
+    /// Removing shortcuts and the program itself.
+    Deleting,
+    /// Removing this machine's identity, accounts and settings.
+    Purging,
+}
+
+impl Phase {
+    /// The steps an action goes through, in order, given its options.
+    pub fn plan(removing: bool, options: Options) -> Vec<Phase> {
+        let mut steps = if removing {
+            vec![Phase::Closing, Phase::Unregistering, Phase::Deleting]
+        } else {
+            vec![Phase::Closing, Phase::Copying, Phase::Integrating]
+        };
+        match removing {
+            true if options.purge => steps.push(Phase::Purging),
+            false if options.launch => steps.push(Phase::Opening),
+            _ => {}
+        }
+        steps
+    }
+}
+
 /// Install this build at `layout`, over whatever is there.
 pub fn install(layout: &Layout, options: Options) -> Result<Report, String> {
+    install_with(layout, options, &mut |_| {})
+}
+
+/// [`install`], saying which [`Phase`] it is starting as it goes.
+pub fn install_with(layout: &Layout, options: Options, phase: &mut dyn FnMut(Phase)) -> Result<Report, String> {
     let mut report = Report::default();
 
+    phase(Phase::Closing);
     if !crate::single_instance::ask_first_to_quit(Duration::from_secs(15)) {
         report
             .warnings
@@ -345,6 +388,7 @@ pub fn install(layout: &Layout, options: Options) -> Result<Report, String> {
         report.steps.push("Closed any running Pravera".into());
     }
 
+    phase(Phase::Copying);
     std::fs::create_dir_all(&layout.dir)
         .map_err(|error| format!("Could not create {}: {error}", layout.dir.display()))?;
 
@@ -375,10 +419,12 @@ pub fn install(layout: &Layout, options: Options) -> Result<Report, String> {
     )
     .map_err(|error| format!("Could not write the install record: {error}"))?;
 
+    phase(Phase::Integrating);
     integrate(layout, options, &mut report);
     sweep_retired(&layout.exe);
 
     if options.launch {
+        phase(Phase::Opening);
         if let Err(error) = open(layout) {
             report.warnings.push(format!("Could not open Pravera: {error}"));
         }
@@ -388,14 +434,21 @@ pub fn install(layout: &Layout, options: Options) -> Result<Report, String> {
 
 /// Remove the install at `layout`.
 pub fn uninstall(layout: &Layout, options: Options) -> Result<Report, String> {
+    uninstall_with(layout, options, &mut |_| {})
+}
+
+/// [`uninstall`], saying which [`Phase`] it is starting as it goes.
+pub fn uninstall_with(layout: &Layout, options: Options, phase: &mut dyn FnMut(Phase)) -> Result<Report, String> {
     let mut report = Report::default();
 
+    phase(Phase::Closing);
     if crate::single_instance::ask_first_to_quit(Duration::from_secs(15)) {
         report.steps.push("Closed any running Pravera".into());
     }
 
     // Before the files: a start-at-sign-in entry or a service left pointing at
     // a deleted file fails quietly every time it fires, forever.
+    phase(Phase::Unregistering);
     //
     // Only the ones that start *this* copy: removing a test install, or an old
     // portable copy, must leave the Pravera that is really in use alone.
@@ -416,6 +469,7 @@ pub fn uninstall(layout: &Layout, options: Options) -> Result<Report, String> {
         }
     }
 
+    phase(Phase::Deleting);
     disintegrate(layout, &mut report);
 
     let target = layout.bundle.as_ref().unwrap_or(&layout.dir);
@@ -427,6 +481,7 @@ pub fn uninstall(layout: &Layout, options: Options) -> Result<Report, String> {
     }
 
     if options.purge {
+        phase(Phase::Purging);
         for dir in [pravera_core::paths::data_dir().ok(), pravera_core::paths::config_dir().ok()]
             .into_iter()
             .flatten()

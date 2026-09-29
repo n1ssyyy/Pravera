@@ -20,7 +20,7 @@
 use std::time::Instant;
 
 use iced::widget::{button, column, container, mouse_area, opaque, pin, row, stack, text, Space};
-use iced::{Alignment, Background, Border, Element, Length, Point, Size};
+use iced::{Alignment, Background, Border, Element, Length, Padding, Point, Size};
 
 use pravera_core::DeviceId;
 use pravera_discovery::{Discovered, DiscoveredPeer};
@@ -77,11 +77,18 @@ impl Entry {
         }
     }
 
-    /// Where it appears to be, if discovery gave an address.
+    /// Where it appears to be, if discovery gave an address: an IPv4 one when
+    /// there is one, then any other IPv6, and a link-local one (`fe80::`, which
+    /// means nothing outside its own cable) only when it is all there is.
     pub fn address(&self) -> Option<String> {
-        self.peer
-            .as_ref()
-            .and_then(|peer| peer.addresses.first())
+        let addresses = &self.peer.as_ref()?.addresses;
+        addresses
+            .iter()
+            .min_by_key(|address| match address {
+                std::net::IpAddr::V4(_) => 0,
+                std::net::IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 != 0xfe80 => 1,
+                std::net::IpAddr::V6(_) => 2,
+            })
             .map(|address| address.to_string())
     }
 
@@ -159,16 +166,13 @@ pub fn entries(discovered: &Discovered, known: &Known) -> Vec<Entry> {
 /// name column takes whatever these leave.
 const COL_PATH: f32 = route_meter::WIDTH;
 const COL_ROUTE: f32 = 150.0;
-const COL_ADDRESS: f32 = 148.0;
-const COL_SYSTEM: f32 = 82.0;
-const COL_CHEVRON: f32 = 16.0;
 
-/// Height of one device row. Tight enough that dozens of machines fit on a
-/// screen, loose enough that a row is an easy target.
-const ROW_HEIGHT: f32 = 40.0;
+/// Height of one device row: two lines of text and an avatar with room around
+/// them, and an easy target.
+const ROW_HEIGHT: f32 = 52.0;
 
-/// Height of the column headings band.
-const HEAD_HEIGHT: f32 = 32.0;
+/// The machine's initial on its colour.
+const AVATAR: f32 = 28.0;
 
 /// The context menu's width, and the height of one of its entries.
 const MENU_WIDTH: f32 = 220.0;
@@ -252,7 +256,7 @@ impl State {
         });
         self.menu_hover.clear(now);
         self.menu_shown.snap(0.0);
-        self.menu_shown.enter(now, motion::DIALOG_IN);
+        self.menu_shown.enter(now, motion::MENU_IN);
     }
 
     /// Put the menu away through its exit. It stays mounted until
@@ -323,29 +327,33 @@ pub fn view<'a>(
 ) -> Element<'a, Message> {
     let since = state.arrived;
 
-    let mut body = column![].spacing(t::GAP).height(Length::Fill);
-    let mut step = 1;
+    let mut content = column![].width(Length::Fill);
     if let Some(banner) = direct_link_banner(discovered) {
-        body = body.push(motion::rise(banner, motion::cascade(since, now, step)));
-        step += 1;
+        content = content.push(motion::settle(banner, motion::cascade(since, now, 1)));
     }
 
-    let list: Element<'a, Message> = if entries.is_empty() {
-        empty_state(scanning)
+    let body: Element<'a, Message> = if entries.is_empty() {
+        content = content.push(
+            container(motion::settle(empty_state(scanning), motion::cascade(since, now, 1)))
+                .center(Length::Fill),
+        );
+        content.height(Length::Fill).into()
     } else {
-        device_list(state, entries, now)
+        content = content.push(device_groups(state, entries, now));
+        content = content.push(hint());
+        components::scroll(content)
     };
-    body = body.push(motion::rise(list, motion::cascade(since, now, step)));
 
     // Answers the question the list above cannot: why a machine you expected
     // is not in it. Three of the four discovery sources can be off,
     // unconfigured, or not written yet, and a missing peer is otherwise
     // indistinguishable from a broken app.
-    body = body.push(motion::rise(sources::view(discovered), motion::cascade(since, now, step + 1)));
+    let footer = motion::settle(sources::footer(discovered), motion::cascade(since, now, 2));
 
-    components::page(
-        motion::rise(header(entries, scanning, state.spin(now)), motion::cascade(since, now, 0)),
+    components::page_footed(
+        motion::settle(header(entries, scanning, state.spin(now)), motion::cascade(since, now, 0)),
         body,
+        footer,
     )
 }
 
@@ -405,11 +413,13 @@ fn scan_button(scanning: bool, spin: f32) -> Element<'static, Message> {
     .spacing(t::SPACE_2)
     .align_y(Alignment::Center);
 
-    button(label)
-        .padding(components::BUTTON_PADDING_SM)
-        .style(theme::ghost_button)
-        .on_press(Message::Refresh)
-        .into()
+    components::glide(|hover| {
+        button(label)
+            .padding(components::BUTTON_PADDING_SM)
+            .style(theme::gliding(hover, theme::ghost_button))
+            .on_press(Message::Refresh)
+            .into()
+    })
 }
 
 // ------------------------------------------------------------------- banner
@@ -417,7 +427,7 @@ fn scan_button(scanning: bool, spin: f32) -> Element<'static, Message> {
 /// Shown when a cable is plugged in.
 ///
 /// This is the headline event the whole direct-link subsystem exists for, so it
-/// gets a surface of its own rather than a row in the table.
+/// gets a band of its own across the top of the list rather than a row in it.
 fn direct_link_banner(discovered: &Discovered) -> Option<Element<'static, Message>> {
     let link = discovered.direct_links.first()?;
 
@@ -429,76 +439,145 @@ fn direct_link_banner(discovered: &Discovered) -> Option<Element<'static, Messag
     );
 
     Some(
-        components::panel(
-            row![
-                components::hero(icon::CABLE, t::ROUTE_DIRECT, "Direct link up", detail),
-                components::pill("Fastest path", components::Tone::Success),
-            ]
-            .spacing(t::SPACE_3)
-            .align_y(Alignment::Center),
-        )
-        .padding([t::SPACE_3, t::SPACE_4])
+        column![
+            container(
+                row![
+                    container(components::hero(icon::CABLE, t::ROUTE_DIRECT, "Direct link up", detail))
+                        .width(Length::Fill),
+                    components::pill("Fastest path", components::Tone::Success),
+                ]
+                .spacing(t::SPACE_3)
+                .align_y(Alignment::Center),
+            )
+            .padding([t::SPACE_3, t::SPACE_6]),
+            components::hairline(),
+        ]
         .width(Length::Fill)
         .into(),
     )
 }
 
-// -------------------------------------------------------------------- table
+// --------------------------------------------------------------------- list
 
-/// The list: headings pinned to the top of the card, rows scrolling under
-/// them, every row the full width and split from the next by a hairline.
-fn device_list<'a>(state: &'a State, entries: &'a [Entry], now: Instant) -> Element<'a, Message> {
-    let mut rows = column![].width(Length::Fill);
-    for (index, entry) in entries.iter().enumerate() {
-        rows = rows.push(device_row(index, entry, state.hovered(index, now)));
-        rows = rows.push(components::hairline());
+/// The list, in two groups: what can be reached now, then what cannot. Each
+/// group is headed by a quiet label with its count, and each row keeps the
+/// position it has in `entries`, because that is what its messages name.
+fn device_groups<'a>(state: &'a State, entries: &'a [Entry], now: Instant) -> Element<'a, Message> {
+    let since = state.arrived;
+    let (online, offline): (Vec<usize>, Vec<usize>) =
+        (0..entries.len()).partition(|&index| entries[index].online());
+
+    let mut list = column![].width(Length::Fill);
+    // Heads and rows arrive as one sequence, each a beat after the one above.
+    let mut step = 0;
+    for (label, members) in [("Online", online), ("Offline", offline)] {
+        if members.is_empty() {
+            continue;
+        }
+        list = list.push(motion::settle(
+            group_head(label, members.len()),
+            motion::row_cascade(since, now, 1, step),
+        ));
+        step += 1;
+        for (place, index) in members.into_iter().enumerate() {
+            if place > 0 {
+                list = list.push(container(components::hairline()).padding([0.0, t::SPACE_6]));
+            }
+            list = list.push(motion::settle(
+                device_row(index, &entries[index], state.hovered(index, now)),
+                motion::row_cascade(since, now, 1, step),
+            ));
+            step += 1;
+        }
     }
-
-    components::panel(column![column_headings(), components::hairline(), components::scroll(rows)])
-        .padding(0)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    list.into()
 }
 
-/// The columns, in one place so the headings cannot drift out of step with
-/// the rows: the name takes whatever the fixed columns leave.
-fn columns<'a>(
-    device: Element<'a, Message>,
-    path: Element<'a, Message>,
-    route: Element<'a, Message>,
-    address: Element<'a, Message>,
-    system: Element<'a, Message>,
-    chevron: Element<'a, Message>,
-) -> iced::widget::Row<'a, Message> {
-    row![
-        container(device).width(Length::Fill).clip(true),
-        container(path).width(Length::Fixed(COL_PATH)),
-        container(route).width(Length::Fixed(COL_ROUTE)).clip(true),
-        container(address).width(Length::Fixed(COL_ADDRESS)).clip(true),
-        container(system).width(Length::Fixed(COL_SYSTEM)).clip(true),
-        container(chevron).width(Length::Fixed(COL_CHEVRON)),
-    ]
-    .spacing(t::SPACE_4)
-    .align_y(Alignment::Center)
+/// The label over a group of rows: what the group is, and how many are in it.
+fn group_head(label: &str, count: usize) -> Element<'static, Message> {
+    container(
+        row![
+            components::section_label(label),
+            text(count.to_string())
+                .size(t::TEXT_XS)
+                .wrapping(text::Wrapping::None)
+                .style(theme::subtle),
+        ]
+        .spacing(t::SPACE_2)
+        .align_y(Alignment::Center),
+    )
+    .padding(Padding {
+        top: t::SPACE_5,
+        right: t::SPACE_6,
+        bottom: t::SPACE_2,
+        left: t::SPACE_6,
+    })
+    .into()
 }
 
-fn column_headings() -> Element<'static, Message> {
-    container(columns(
-        components::section_label("Device"),
-        components::section_label("Path"),
-        components::section_label("Route"),
-        components::section_label("Address"),
-        components::section_label("System"),
-        Space::new().into(),
-    ))
-    .padding([0.0, t::SPACE_4])
-    .height(Length::Fixed(HEAD_HEIGHT))
-    .center_y(Length::Fixed(HEAD_HEIGHT))
+/// Under the last group, so a short list reads as finished rather than cut off.
+fn hint() -> Element<'static, Message> {
+    container(
+        text("Machines on this network appear here on their own. Add one by its connect code from anywhere.")
+            .size(t::TEXT_XS)
+            .style(theme::subtle),
+    )
+    .padding(Padding {
+        top: t::SPACE_6,
+        right: t::SPACE_6,
+        bottom: t::SPACE_6,
+        left: t::SPACE_6,
+    })
     .width(Length::Fill)
     .into()
 }
 
+/// What a machine's system is called on screen.
+fn system_name(os: &str) -> String {
+    match os.trim().to_ascii_lowercase().as_str() {
+        "windows" => "Windows".to_string(),
+        "linux" => "Linux".to_string(),
+        "macos" | "darwin" => "macOS".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The small line under a machine's name: where it is and what it runs. Parts
+/// nothing has reported are left out rather than spelled "unknown". A machine
+/// with neither says who it was last signed in as, when it remembers.
+fn subline(entry: &Entry) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(address) = entry.address() {
+        parts.push(address);
+    }
+    if let Some(system) = entry.peer.as_ref().and_then(|peer| peer.os.as_deref()) {
+        let system = system_name(system);
+        if !system.is_empty() {
+            parts.push(system);
+        }
+    }
+    if parts.is_empty() {
+        return entry.username.as_ref().map(|user| format!("signed in as {user}"));
+    }
+    Some(parts.join(" \u{00b7} "))
+}
+
+/// The route in words: what carries the traffic, or that nothing does.
+fn route_words(entry: &Entry) -> String {
+    if entry.online() {
+        entry.route_label()
+    } else {
+        "Offline".to_string()
+    }
+}
+
+/// One machine: who it is, how it is reached, and what can be done with it,
+/// which shows only under the pointer.
+///
+/// The row is the connect button, so the whole width answers a press. The
+/// actions on the right are separate buttons on top of it; they exist for the
+/// two other things a machine can be asked, and to make the row's menu findable
+/// without a right click.
 fn device_row(index: usize, entry: &Entry, hover: f32) -> Element<'static, Message> {
     let shape = entry.peer.as_ref().map(Shape::of).unwrap_or(Shape::Broken);
     let tint = route_tint(shape);
@@ -509,7 +588,7 @@ fn device_row(index: usize, entry: &Entry, hover: f32) -> Element<'static, Messa
     let name = text(entry.name.clone())
         .size(t::TEXT_SM)
         .wrapping(text::Wrapping::None)
-        .font(t::FONT_UI_MEDIUM)
+        .font(t::FONT_UI_STRONG)
         .style(theme::tinted(if online {
             t::FOREGROUND
         } else {
@@ -519,11 +598,19 @@ fn device_row(index: usize, entry: &Entry, hover: f32) -> Element<'static, Messa
     // A padlock beside the name means this machine has been connected to
     // before, so choosing it fills in its code and username and asks only for
     // the password. Drawn quietly: it answers a question not yet asked.
-    let mut named = row![components::avatar_faded(&entry.name, 22.0, alpha), name]
-        .spacing(t::SPACE_3)
-        .align_y(Alignment::Center);
+    let mut title = row![name].spacing(t::SPACE_2).align_y(Alignment::Center);
     if entry.saved {
-        named = named.push(icon::stroked(icon::LOCK, 11.0, t::SUBTLE_FOREGROUND));
+        title = title.push(icon::stroked(icon::LOCK, 11.0, t::SUBTLE_FOREGROUND));
+    }
+    let mut lines = column![title].spacing(2.0);
+    if let Some(line) = subline(entry) {
+        lines = lines.push(
+            text(line)
+                .size(t::TEXT_XS)
+                .font(t::FONT_MONO)
+                .wrapping(text::Wrapping::None)
+                .style(theme::tinted(theme::faded(t::SUBTLE_FOREGROUND, alpha))),
+        );
     }
 
     // An unreachable peer gets no route description. Tailscale keeps reporting
@@ -531,7 +618,7 @@ fn device_row(index: usize, entry: &Entry, hover: f32) -> Element<'static, Messa
     // rendering that would say there is a path where there is none.
     let route = row![
         components::dot(theme::faded(tint, alpha), 6.0),
-        text(entry.route_label())
+        text(route_words(entry))
             .size(t::TEXT_XS)
             .wrapping(text::Wrapping::None)
             .style(theme::tinted(theme::faded(t::NEUTRAL_300, alpha))),
@@ -539,58 +626,83 @@ fn device_row(index: usize, entry: &Entry, hover: f32) -> Element<'static, Messa
     .spacing(t::SPACE_2)
     .align_y(Alignment::Center);
 
-    let address = text(entry.address().unwrap_or_else(|| "no address".to_string()))
-        .size(t::TEXT_XS)
-        .font(t::FONT_MONO)
-        .wrapping(text::Wrapping::None)
-        .style(theme::tinted(theme::faded(t::NEUTRAL_300, alpha)));
+    let body = row![
+        components::avatar_faded(&entry.name, AVATAR, alpha),
+        container(lines).width(Length::Fill).clip(true),
+        container(route_meter::view(shape, tint, alpha)).width(Length::Fixed(COL_PATH)),
+        container(route).width(Length::Fixed(COL_ROUTE)).clip(true),
+        actions(index, hover),
+    ]
+    .spacing(t::SPACE_4)
+    .align_y(Alignment::Center);
 
-    let system = text(
-        entry
-            .peer
-            .as_ref()
-            .and_then(|peer| peer.os.clone())
-            .unwrap_or_else(|| "unknown".to_string()),
-    )
-    .size(t::TEXT_XS)
-    .wrapping(text::Wrapping::None)
-    .style(theme::tinted(theme::faded(t::MUTED_FOREGROUND, alpha)));
-
-    // The chevron only exists under the pointer. It is the affordance saying
-    // the row does something; on every row at rest it would be a column of
-    // arrows pointing at nothing.
-    let chevron = icon::stroked(
-        icon::CHEVRON_RIGHT,
-        13.0,
-        t::with_alpha(t::FOREGROUND, hover),
-    );
-
-    let body = columns(
-        named.into(),
-        route_meter::view(shape, tint, alpha),
-        route.into(),
-        address.into(),
-        system.into(),
-        chevron,
-    );
-
-    let surface = container(body)
-        .padding([0.0, t::SPACE_4])
-        .height(Length::Fixed(ROW_HEIGHT))
-        .center_y(Length::Fixed(ROW_HEIGHT))
+    let surface = button(container(body).center_y(Length::Fill).width(Length::Fill).height(Length::Fill))
         .width(Length::Fill)
-        .style(move |_| container::Style {
-            background: Some(Background::Color(t::with_alpha(t::NEUTRAL_800, hover * 0.8))),
-            ..container::Style::default()
-        });
+        .height(Length::Fixed(ROW_HEIGHT))
+        .padding([0.0, t::SPACE_6])
+        .style(move |_, status| button::Style {
+            // Under the pointer the row lifts; pressed, it settles back
+            // towards the surface it sits on.
+            background: Some(Background::Color(match status {
+                button::Status::Pressed => t::NEUTRAL_825,
+                _ => t::with_alpha(t::NEUTRAL_800, hover * 0.8),
+            })),
+            text_color: t::FOREGROUND,
+            border: Border::default(),
+            ..button::Style::default()
+        })
+        .on_press(Message::ChooseDevice(index));
 
     mouse_area(surface)
-        .on_press(Message::ChooseDevice(index))
         .on_right_press(Message::DeviceMenu(index))
         .on_enter(Message::HoverDevice(index, true))
         .on_exit(Message::HoverDevice(index, false))
-        .interaction(iced::mouse::Interaction::Pointer)
         .into()
+}
+
+/// What can be done to a machine from its row: connect, open a terminal, or the
+/// menu with the rest. All three fade in with the row's hover.
+fn actions(index: usize, show: f32) -> Element<'static, Message> {
+    let connect = components::glide(|hover| {
+        button(components::label(
+            Some(icon::CONNECT),
+            "Connect",
+            theme::faded(t::PRIMARY_FOREGROUND, show),
+        ))
+        .padding(components::BUTTON_PADDING_SM)
+        .style(move |theme, status| {
+            theme::fade_button(theme::glided(theme::primary_button, hover.get(), theme, status), show)
+        })
+        .on_press(Message::ChooseDevice(index))
+        .into()
+    });
+
+    row![
+        connect,
+        action_icon(icon::TERMINAL, Message::MenuTerminal(index), show),
+        action_icon(icon::MORE, Message::DeviceMenu(index), show),
+    ]
+    .spacing(t::SPACE_1)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn action_icon(glyph: &'static str, message: Message, show: f32) -> Element<'static, Message> {
+    components::glide(|hover| {
+        button(
+            container(icon::stroked(glyph, t::ICON_SM, theme::faded(t::MUTED_FOREGROUND, show)))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        )
+        .width(Length::Fixed(t::CONTROL_HEIGHT_SM))
+        .height(Length::Fixed(t::CONTROL_HEIGHT_SM))
+        .padding(0)
+        .style(move |theme, status| {
+            theme::fade_button(theme::glided(theme::ghost_button, hover.get(), theme, status), show)
+        })
+        .on_press(message)
+        .into()
+    })
 }
 
 // --------------------------------------------------------------------- menu
@@ -642,7 +754,7 @@ pub fn menu_view<'a>(
         .width(Length::Fixed(MENU_WIDTH))
         .opacity(alpha)
         .shadow(iced::Shadow {
-            color: theme::faded(iced::Color::BLACK, 0.45 * alpha),
+            color: theme::faded(t::SHADOW_INK, 0.45 * alpha),
             ..theme::SHADOW_FLOAT
         });
 
@@ -756,11 +868,7 @@ fn empty_state(scanning: bool) -> Element<'static, Message> {
         )
     };
 
-    components::panel(container(components::empty(glyph, headline, detail)).center(Length::Fill))
-        .padding(0)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    components::empty(glyph, headline, detail).into()
 }
 
 /// The one place colour is spent on this screen.
@@ -860,7 +968,7 @@ mod tests {
         let mut state = State::default();
         state.replay(start);
         assert!(state.is_animating(start));
-        let settled = start + motion::ENTRANCE + motion::STAGGER_MAX;
+        let settled = start + motion::ENTRANCE + motion::STAGGER_MAX + motion::STAGGER_MAX;
         assert!(!state.is_animating(settled));
     }
 
@@ -896,7 +1004,7 @@ mod tests {
         assert!(state.is_menu_open());
 
         // Closed once it has fully arrived, so there is an exit to play.
-        let later = now + motion::DIALOG_IN + motion::MICRO;
+        let later = now + motion::MENU_IN + motion::MICRO;
         state.close_menu(later);
         assert!(!state.is_menu_open(), "a closing menu no longer counts as open");
         assert!(!state.take_finished_menu_close(later), "unmounted before its exit played");
@@ -914,6 +1022,74 @@ mod tests {
         assert!(state.menu.is_none());
     }
 
+
+    // ------------------------------------------------------------- the row
+
+    fn entry(peer: Option<DiscoveredPeer>, username: Option<&str>) -> Entry {
+        Entry {
+            name: "evercore".into(),
+            device_id: None,
+            code: None,
+            username: username.map(str::to_string),
+            peer,
+            saved: username.is_some(),
+        }
+    }
+
+    #[test]
+    fn an_ipv4_address_outranks_a_link_local_one_however_they_arrive() {
+        let mut found = peer("a", PeerSource::Iroh, true);
+        found.addresses = vec![
+            "fe80::5781:23f9:85a9:9f47".parse().unwrap(),
+            "2001:db8::1".parse().unwrap(),
+            "192.168.1.50".parse().unwrap(),
+        ];
+        assert_eq!(entry(Some(found.clone()), None).address().as_deref(), Some("192.168.1.50"));
+        found.addresses.remove(2);
+        assert_eq!(entry(Some(found.clone()), None).address().as_deref(), Some("2001:db8::1"));
+        found.addresses.remove(1);
+        assert_eq!(
+            entry(Some(found), None).address().as_deref(),
+            Some("fe80::5781:23f9:85a9:9f47")
+        );
+    }
+
+    #[test]
+    fn the_line_under_a_name_is_the_address_and_the_system() {
+        let line = subline(&entry(Some(peer("a", PeerSource::Iroh, true)), None));
+        assert_eq!(line.as_deref(), Some("100.64.0.1 \u{b7} Linux"));
+    }
+
+    #[test]
+    fn a_part_nothing_reported_is_left_out_rather_than_called_unknown() {
+        let mut found = peer("a", PeerSource::Iroh, true);
+        found.os = None;
+        assert_eq!(subline(&entry(Some(found), None)).as_deref(), Some("100.64.0.1"));
+
+        let mut nowhere = peer("a", PeerSource::Iroh, true);
+        nowhere.os = None;
+        nowhere.addresses.clear();
+        let line = subline(&entry(Some(nowhere), Some("driver")));
+        assert_eq!(line.as_deref(), Some("signed in as driver"));
+        assert_eq!(subline(&entry(None, None)), None);
+    }
+
+    #[test]
+    fn a_machine_that_cannot_be_reached_says_offline_whatever_it_last_used() {
+        let gone = entry(Some(peer("a", PeerSource::Iroh, false)), None);
+        assert_eq!(route_words(&gone), "Offline");
+        assert_eq!(route_words(&entry(None, Some("driver"))), "Offline");
+        let here = entry(Some(peer("a", PeerSource::Iroh, true)), None);
+        assert_eq!(route_words(&here), "Internet");
+    }
+
+    #[test]
+    fn systems_are_written_the_way_their_makers_write_them() {
+        assert_eq!(system_name("windows"), "Windows");
+        assert_eq!(system_name("MacOS"), "macOS");
+        assert_eq!(system_name("darwin"), "macOS");
+        assert_eq!(system_name("freebsd"), "freebsd");
+    }
 
     // ------------------------------------------------------------- the merge
 

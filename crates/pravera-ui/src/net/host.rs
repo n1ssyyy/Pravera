@@ -44,7 +44,7 @@ use tracing::{debug, info, warn};
 /// Written out in full because the person reading it is very likely sitting at
 /// a different machine wondering why this one refuses.
 pub const NO_DISPLAY: &str = "This machine has no screen to share. Hosting refuses \
-     until one appears — plug in a monitor or an HDMI/DisplayPort dummy plug, or \
+     until one appears: plug in a monitor or an HDMI/DisplayPort dummy plug, or \
      let Pravera add its virtual display: install the Pravera service, or run \
      pravera.exe once as administrator.";
 

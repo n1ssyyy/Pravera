@@ -7,10 +7,12 @@
 //!
 //! ## The page
 //!
-//! Every page is DigiClip's: a 40px header card, the 5px gap with a hairline
-//! stub dropping from the header into what it heads, and a body that fills the
-//! rest of the window and scrolls inside itself. The window never scrolls, so
-//! the header is always where the eye left it.
+//! Every page is one sheet: a single bevelled panel filling the window to the
+//! right of the rail. The header is the top region of the sheet, a hairline
+//! splits it from the body, and the body scrolls inside itself. A second pane
+//! or a footer is another region of the same sheet, split by a hairline, never
+//! a card set inside it. The window never scrolls, so the header is always
+//! where the eye left it.
 
 pub mod route_meter;
 pub mod sources;
@@ -19,10 +21,14 @@ pub mod titlebar;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, Space};
-use iced::{Alignment, Background, Border, Color, Element, Length, Padding};
+use std::time::Instant;
+
+use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Theme};
 
 use crate::icon;
+use crate::motion;
 use crate::theme::{self, tokens as t};
+use crate::widget::glide::{self, Glide};
 
 /// A one-pixel horizontal hairline.
 ///
@@ -273,33 +279,81 @@ impl<'a, Message: 'a> From<Panel<'a, Message>> for Element<'a, Message> {
 // The page
 // ---------------------------------------------------------------------------
 
-/// A page: header, the stub in the gap, and the body filling the rest.
+/// The one surface a page is drawn on: a single bevelled sheet that fills the
+/// window to the right of the rail. Its header, its body and any footer or
+/// second pane are regions of it, split by hairlines, never cards of their own.
 ///
-/// The stub is DigiClip's: a one-pixel line in the 5px gap, 24px in, so the
-/// header and the body read as a pair without touching.
+/// The sheet is chrome, not content: the shell draws it once, round whatever
+/// page is in front, so changing page changes what is on the sheet and never
+/// the sheet. The rule under the header is the sheet's too, for the same
+/// reason. The page functions below therefore make the sheet's contents only,
+/// leaving a one pixel gap where the rule falls.
+pub fn sheet<'a, Message: 'a>(contents: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    let rule = container(hairline())
+        .padding(Padding {
+            top: t::HEADER_HEIGHT,
+            ..Padding::ZERO
+        })
+        .width(Length::Fill)
+        .height(Length::Fill);
+    panel(
+        iced::widget::Stack::with_children([contents.into(), rule.into()])
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .radius(t::RADIUS_LG)
+    .padding(0)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+/// The gap the sheet's own header rule is drawn in.
+fn header_rule<'a, Message: 'a>() -> Element<'a, Message> {
+    Space::new().height(Length::Fixed(1.0)).into()
+}
+
+/// A page: the header across the top of the sheet, and the body filling the
+/// rest and scrolling inside itself.
 pub fn page<'a, Message: 'a>(
     header: impl Into<Element<'a, Message>>,
     body: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let stub = row![
-        Space::new().width(Length::Fixed(t::SPACE_6 - 1.0)),
-        container(Space::new().width(Length::Fixed(1.0)).height(Length::Fill)).style(|_| {
-            container::Style {
-                background: Some(Background::Color(t::BORDER)),
-                ..container::Style::default()
-            }
-        }),
-    ]
-    .height(Length::Fixed(t::GAP));
-
-    column![header.into(), stub, body.into()]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    column![header.into(), header_rule(), body.into()].into()
 }
 
-/// A page's header card: the title, what the page is showing at a glance, and
-/// the page's actions on the right.
+/// A page with a strip along the bottom of its sheet, under a hairline of its
+/// own: a status readout, a ledger, anything that belongs to the whole page
+/// rather than to what scrolls above it.
+pub fn page_footed<'a, Message: 'a>(
+    header: impl Into<Element<'a, Message>>,
+    body: impl Into<Element<'a, Message>>,
+    footer: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    column![header.into(), header_rule(), body.into(), hairline(), footer.into()].into()
+}
+
+/// A page of two panes: `left` at a fixed width, a vertical hairline, and
+/// `right` taking the rest. Each pane brings its own scrolling.
+pub fn page_split<'a, Message: 'a>(
+    header: impl Into<Element<'a, Message>>,
+    left: impl Into<Element<'a, Message>>,
+    left_width: f32,
+    right: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let panes = row![
+        container(left.into())
+            .width(Length::Fixed(left_width))
+            .height(Length::Fill),
+        vrule(Length::Fill),
+        container(right.into()).width(Length::Fill).height(Length::Fill),
+    ]
+    .height(Length::Fill);
+    column![header.into(), header_rule(), panes].into()
+}
+
+/// A page's header: the title, what the page is showing at a glance, and the
+/// page's actions on the right. It is the top region of the sheet.
 pub struct Header<'a, Message> {
     title: &'a str,
     meta: Vec<Element<'a, Message>>,
@@ -330,58 +384,44 @@ impl<'a, Message: 'a> Header<'a, Message> {
 
 impl<'a, Message: 'a> From<Header<'a, Message>> for Element<'a, Message> {
     fn from(header: Header<'a, Message>) -> Self {
-        let has_actions = !header.actions.is_empty();
         let mut line = row![text(header.title)
-            .size(t::TEXT_SM)
+            .size(t::TEXT_LG)
             .font(t::FONT_UI_STRONG)
             .wrapping(text::Wrapping::None)
             .style(theme::heading)]
         .spacing(t::SPACE_3)
-        .align_y(Alignment::Center)
-        .height(Length::Fill);
+        .align_y(Alignment::Center);
         for meta in header.meta {
             line = line.push(meta);
         }
         line = line.push(Space::new().width(Length::Fill));
         line = line.push(
             row(header.actions)
-                .spacing(t::SPACE_1_5)
+                .spacing(t::SPACE_2)
                 .align_y(Alignment::Center),
         );
 
-        // A button in the band sits as far from the right edge as from the
-        // top and bottom, so it reads as placed rather than pushed.
-        let inset = (t::HEADER_HEIGHT - 2.0 - t::CONTROL_HEIGHT_SM) / 2.0;
-        panel(line)
-            .padding(Padding {
-                top: 0.0,
-                bottom: 0.0,
-                left: t::SPACE_4,
-                right: if has_actions { inset } else { t::SPACE_4 },
-            })
+        container(line)
+            .padding([0.0, t::SPACE_6])
             .width(Length::Fill)
             .height(Length::Fixed(t::HEADER_HEIGHT))
-            .center_y()
+            .center_y(Length::Fixed(t::HEADER_HEIGHT))
             .into()
     }
 }
 
-/// A card that fills what the page leaves and scrolls inside itself.
+/// What a page's body holds, scrolling inside the sheet.
 pub fn body<'a, Message: 'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    body_with(content, t::SPACE_4)
+    body_with(content, [t::SPACE_5, t::SPACE_6])
 }
 
-/// The same with its own inset: a list whose rows run nearly to the card's
+/// The same with its own inset: a list whose rows run nearly to the sheet's
 /// edges wants less than a column of prose does.
 pub fn body_with<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
     padding: impl Into<Padding>,
 ) -> Element<'a, Message> {
-    panel(scroll(container(content).padding(padding).width(Length::Fill)))
-        .padding(0)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    scroll(container(content).padding(padding).width(Length::Fill))
 }
 
 /// The same body with its content held to a reading width and centred, for
@@ -389,8 +429,23 @@ pub fn body_with<'a, Message: 'a>(
 pub fn reading_body<'a, Message: 'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     body(
         container(container(content).max_width(t::READING_WIDTH).width(Length::Fill))
-            .center_x(Length::Fill)
-            .padding([t::SPACE_2, 0.0]),
+            .center_x(Length::Fill),
+    )
+}
+
+/// The same body held to a reading width but set against the left edge, for
+/// a pane that sits beside a list it belongs to: centred, it would leave a
+/// gutter between the two. It starts [`t::SPACE_8`] from what is to its left.
+pub fn leading_body<'a, Message: 'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    scroll(
+        container(container(content).max_width(t::READING_WIDTH).width(Length::Fill))
+            .padding(Padding {
+                top: t::SPACE_5,
+                right: t::SPACE_8,
+                bottom: t::SPACE_5,
+                left: t::SPACE_8,
+            })
+            .width(Length::Fill),
     )
 }
 
@@ -539,6 +594,35 @@ pub fn empty_state<'a, Message: 'a>(line: &'a str) -> Element<'a, Message> {
 // Marks
 // ---------------------------------------------------------------------------
 
+/// A mark with a small dot at its corner: something waiting there. `ring` is
+/// the surface the mark sits on, which the dot is cut out of.
+pub fn badged<'a, Message: 'a>(mark: Element<'a, Message>, tint: Color, ring: Color) -> Element<'a, Message> {
+    const BOX: f32 = t::ICON + 6.0;
+    iced::widget::Stack::with_children([
+        container(mark)
+            .center_x(Length::Fixed(BOX))
+            .center_y(Length::Fixed(BOX))
+            .into(),
+        container(
+            container(Space::new().width(Length::Fixed(7.0)).height(Length::Fixed(7.0))).style(move |_| {
+                container::Style {
+                    background: Some(Background::Color(tint)),
+                    border: Border {
+                        color: ring,
+                        width: 1.5,
+                        radius: t::RADIUS_FULL.into(),
+                    },
+                    ..container::Style::default()
+                }
+            }),
+        )
+        .align_right(Length::Fill)
+        .align_top(Length::Fill)
+        .into(),
+    ])
+    .into()
+}
+
 /// A filled status dot.
 pub fn dot<'a, Message: 'a>(color: Color, size: f32) -> Element<'a, Message> {
     container(Space::new())
@@ -679,50 +763,6 @@ pub fn callout<'a, Message: 'a>(
         ..container::Style::default()
     })
     .into()
-}
-
-/// A row of figures in one bordered strip, each cell centred, split by
-/// hairlines. DigiClip's health strip.
-pub fn stats<'a, Message: 'a>(cells: Vec<(&'a str, String, Color)>) -> Element<'a, Message> {
-    const HEIGHT: f32 = 54.0;
-    let mut strip = row![].height(Length::Fixed(HEIGHT));
-    for (index, (label, value, tint)) in cells.into_iter().enumerate() {
-        if index > 0 {
-            strip = strip.push(vrule(Length::Fill));
-        }
-        strip = strip.push(
-            container(
-                column![
-                    text(t::tracked(label))
-                        .size(t::TEXT_2XS)
-                        .font(t::FONT_UI_MEDIUM)
-                        .wrapping(text::Wrapping::None)
-                        .style(theme::muted),
-                    text(value)
-                        .size(t::TEXT_LG)
-                        .font(t::FONT_UI_STRONG)
-                        .wrapping(text::Wrapping::None)
-                        .style(theme::tinted(tint)),
-                ]
-                .spacing(2.0)
-                .align_x(Alignment::Center),
-            )
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
-        );
-    }
-    container(strip)
-        .width(Length::Fill)
-        .style(|_| container::Style {
-            background: Some(Background::Color(t::BACKGROUND)),
-            border: Border {
-                color: t::BORDER,
-                width: 1.0,
-                radius: t::RADIUS.into(),
-            },
-            ..container::Style::default()
-        })
-        .into()
 }
 
 /// A block of machine text — an address, a snippet, a code — sunk into the
@@ -931,29 +971,29 @@ pub fn avatar_faded<'a, Message: 'a>(name: &str, size: f32, opacity: f32) -> Ele
 // ---------------------------------------------------------------------------
 
 /// A square ghost button holding one icon: muted at rest, lit on hover.
-pub fn icon_button<'a, Message: Clone + 'a>(
-    glyph: &'static str,
-    on_press: Option<Message>,
-) -> iced::widget::Button<'a, Message> {
+pub fn icon_button<'a, Message: Clone + 'a>(glyph: &'static str, on_press: Option<Message>) -> Element<'a, Message> {
     let muted = on_press.is_none();
-    button(
-        container(icon::stroked(
-            glyph,
-            t::ICON_SM,
-            if muted {
-                t::with_alpha(t::MUTED_FOREGROUND, 0.5)
-            } else {
-                t::MUTED_FOREGROUND
-            },
-        ))
-        .center_x(Length::Fill)
-        .center_y(Length::Fill),
-    )
-    .width(Length::Fixed(t::CONTROL_HEIGHT_SM))
-    .height(Length::Fixed(t::CONTROL_HEIGHT_SM))
-    .padding(0)
-    .style(theme::ghost_button)
-    .on_press_maybe(on_press)
+    glide(|hover| {
+        button(
+            container(icon::stroked(
+                glyph,
+                t::ICON_SM,
+                if muted {
+                    t::with_alpha(t::MUTED_FOREGROUND, 0.5)
+                } else {
+                    t::MUTED_FOREGROUND
+                },
+            ))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+        )
+        .width(Length::Fixed(t::CONTROL_HEIGHT_SM))
+        .height(Length::Fixed(t::CONTROL_HEIGHT_SM))
+        .padding(0)
+        .style(theme::gliding(hover, theme::ghost_button))
+        .on_press_maybe(on_press)
+        .into()
+    })
 }
 
 /// A button's label: an icon and a word, spaced the way every button is.
@@ -972,6 +1012,16 @@ pub fn label<'a, Message: 'a>(glyph: Option<&'static str>, words: &'a str, tint:
         .into()
 }
 
+/// A control whose hover eases in and out. `build` is given the hover the
+/// control's style should read (see [`theme::gliding`]) and returns the control.
+///
+/// This is the way to have a button that does not switch colour in a single
+/// frame; the buttons below are all made with it.
+pub fn glide<'a, Message: 'a>(build: impl FnOnce(glide::Hover) -> Element<'a, Message>) -> Element<'a, Message> {
+    let hover = glide::hover();
+    Glide::new(hover.clone(), build(hover)).into()
+}
+
 /// The compact button every header and card uses: an icon and a word on the
 /// quiet filled style. `None` draws it disabled.
 pub fn small_button<'a, Message: Clone + 'a>(
@@ -984,11 +1034,13 @@ pub fn small_button<'a, Message: Clone + 'a>(
     } else {
         t::with_alpha(t::FOREGROUND, 0.5)
     };
-    button(label(glyph, words, tint))
-        .padding(BUTTON_PADDING_SM)
-        .style(theme::secondary_button)
-        .on_press_maybe(on_press)
-        .into()
+    glide(|hover| {
+        button(label(glyph, words, tint))
+            .padding(BUTTON_PADDING_SM)
+            .style(theme::gliding(hover, theme::secondary_button))
+            .on_press_maybe(on_press)
+            .into()
+    })
 }
 
 /// The one action a view exists for: white, with near-black words. At most
@@ -998,32 +1050,36 @@ pub fn primary_button<'a, Message: Clone + 'a>(
     words: &'a str,
     on_press: Option<Message>,
 ) -> Element<'a, Message> {
-    button(label(glyph, words, t::PRIMARY_FOREGROUND))
-        .padding(BUTTON_PADDING_SM)
-        .style(theme::primary_button)
-        .on_press_maybe(on_press)
-        .into()
+    glide(|hover| {
+        button(label(glyph, words, t::PRIMARY_FOREGROUND))
+            .padding(BUTTON_PADDING_SM)
+            .style(theme::gliding(hover, theme::primary_button))
+            .on_press_maybe(on_press)
+            .into()
+    })
 }
 
 /// The copy control: turns into a confirmation for as long as it is true.
 pub fn copy_button<'a, Message: Clone + 'a>(copied: bool, on_press: Message) -> Element<'a, Message> {
     let tint = if copied { t::LIME } else { t::FOREGROUND };
-    button(
-        row![
-            icon::stroked(if copied { icon::CHECK } else { icon::COPY }, 12.0, tint),
-            text(if copied { "Copied" } else { "Copy" })
-                .size(t::TEXT_XS)
-                .font(t::FONT_UI_MEDIUM)
-                .wrapping(text::Wrapping::None)
-                .style(theme::tinted(tint)),
-        ]
-        .spacing(t::SPACE_1_5)
-        .align_y(Alignment::Center),
-    )
-    .padding([t::SPACE_1 + 1.0, t::SPACE_2 + 2.0])
-    .style(theme::secondary_button)
-    .on_press(on_press)
-    .into()
+    glide(|hover| {
+        button(
+            row![
+                icon::stroked(if copied { icon::CHECK } else { icon::COPY }, 12.0, tint),
+                text(if copied { "Copied" } else { "Copy" })
+                    .size(t::TEXT_XS)
+                    .font(t::FONT_UI_MEDIUM)
+                    .wrapping(text::Wrapping::None)
+                    .style(theme::tinted(tint)),
+            ]
+            .spacing(t::SPACE_1_5)
+            .align_y(Alignment::Center),
+        )
+        .padding([t::SPACE_1 + 1.0, t::SPACE_2 + 2.0])
+        .style(theme::gliding(hover, theme::secondary_button))
+        .on_press(on_press)
+        .into()
+    })
 }
 
 /// A switch, drawn: DigiClip's 36 by 20 track with the knob that travels.
@@ -1150,52 +1206,81 @@ pub fn list_row<'a, Message: 'a>(
 }
 
 /// A segmented control: one choice of a few, DigiClip's filter chips joined
-/// into one bevelled bar.
+/// into one bevelled bar. The chosen cell is a tile that slides under it, and
+/// its label lights as the tile arrives; `thumb` is the screen's record of
+/// where the tile is.
 pub fn segmented<'a, Message: Clone + 'a>(
-    choices: Vec<(String, bool, Message)>,
+    choices: Vec<(String, Message)>,
+    thumb: &motion::Thumb,
+    now: Instant,
 ) -> Element<'a, Message> {
-    let mut bar = row![].spacing(2.0).height(Length::Fill);
-    for (words, chosen, message) in choices {
+    let count = choices.len();
+    let mut bar = row![].height(Length::Fill);
+    for (index, (words, message)) in choices.into_iter().enumerate() {
+        // How much of the thumb is under this cell. The label is lit by it, and
+        // the cell stops drawing a fill of its own once the thumb is there.
+        let held = thumb.amount(index, now);
+        let chosen = thumb.chosen() == index;
         bar = bar.push(
-            button(
-                container(
-                    text(words)
-                        .size(t::TEXT_XS + 1.0)
-                        .font(if chosen { t::FONT_UI_MEDIUM } else { t::FONT_UI })
-                        .wrapping(text::Wrapping::None),
+            container(glide(move |hover| {
+                button(
+                    container(
+                        text(words)
+                            .size(t::TEXT_XS + 1.0)
+                            .font(if chosen { t::FONT_UI_MEDIUM } else { t::FONT_UI })
+                            .wrapping(text::Wrapping::None),
+                    )
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
                 )
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding([0.0, t::SPACE_3])
-            .style(move |_, status| {
-                let (fill, ink) = if chosen {
-                    (t::NEUTRAL_700, t::FOREGROUND)
-                } else {
-                    match status {
-                        button::Status::Hovered => (t::NEUTRAL_800, t::FOREGROUND),
-                        button::Status::Pressed => (t::NEUTRAL_750, t::FOREGROUND),
-                        _ => (Color::TRANSPARENT, t::MUTED_FOREGROUND),
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding([0.0, t::SPACE_3])
+                .style(move |_, status| {
+                    // Under the pointer a cell lifts, and stops lifting as the
+                    // tile arrives under it.
+                    let lift = hover.get() * (1.0 - held);
+                    let fill = match status {
+                        button::Status::Pressed => t::NEUTRAL_750,
+                        _ => t::with_alpha(t::NEUTRAL_800, lift),
+                    };
+                    button::Style {
+                        background: Some(Background::Color(fill)),
+                        text_color: theme::blend(
+                            theme::blend(t::MUTED_FOREGROUND, t::FOREGROUND, hover.get()),
+                            t::FOREGROUND,
+                            held,
+                        ),
+                        border: Border {
+                            radius: t::RADIUS_SM.into(),
+                            ..Border::default()
+                        },
+                        ..button::Style::default()
                     }
-                };
-                button::Style {
-                    background: Some(Background::Color(fill)),
-                    text_color: ink,
-                    border: Border {
-                        color: if chosen { t::BEVEL_HOVER.sides } else { Color::TRANSPARENT },
-                        width: if chosen { 1.0 } else { 0.0 },
-                        radius: t::RADIUS_SM.into(),
-                    },
-                    ..button::Style::default()
-                }
-            })
-            .on_press(message),
+                })
+                .on_press(message)
+                .into()
+            }))
+            .padding([0.0, 1.0])
+            .width(Length::Fill)
+            .height(Length::Fill),
         );
     }
 
-    container(bar)
+    let layers = iced::widget::Stack::with_children([Element::from(bar)])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .push_under(thumb_layer(thumb.position(now), count, |_| container::Style {
+            background: Some(Background::Color(t::NEUTRAL_700)),
+            border: Border {
+                color: t::BEVEL_HOVER.sides,
+                width: 1.0,
+                radius: t::RADIUS_SM.into(),
+            },
+            ..container::Style::default()
+        }));
+
+    container(layers)
         .padding(2.0)
         .width(Length::Fill)
         .height(Length::Fixed(t::CONTROL_HEIGHT))
@@ -1209,6 +1294,53 @@ pub fn segmented<'a, Message: Clone + 'a>(
             ..container::Style::default()
         })
         .into()
+}
+
+/// The shares of a segmented control's width that fall before, under and after
+/// its thumb when the thumb is `position` segments from the first, out of
+/// `count` equal ones. A row of three portions laid out with these puts the
+/// thumb exactly over that fraction of the control; integer portions of a
+/// thousand a segment make the slide smooth to a fraction of a pixel.
+pub fn thumb_portions(position: f32, count: usize) -> [u16; 3] {
+    const UNIT: f32 = 1000.0;
+    let last = count.saturating_sub(1) as f32;
+    let position = position.clamp(0.0, last);
+    [
+        (position * UNIT).round() as u16,
+        UNIT as u16,
+        ((last - position) * UNIT).round() as u16,
+    ]
+}
+
+/// The tile that slides under the chosen cell of a segmented control: a layer
+/// as wide and tall as the control, holding the tile at `position`. Each cell
+/// of the control sits a pixel in from its share of the width on both sides,
+/// and so does the tile, which keeps the two lined up and leaves a gap between
+/// neighbours.
+pub fn thumb_layer<'a, Message: 'a>(
+    position: f32,
+    count: usize,
+    style: impl Fn(&Theme) -> container::Style + 'a,
+) -> Element<'a, Message> {
+    let share = |portion: u16| {
+        if portion == 0 {
+            Length::Fixed(0.0)
+        } else {
+            Length::FillPortion(portion)
+        }
+    };
+    let [before, tile, after] = thumb_portions(position, count);
+    row![
+        Space::new().width(share(before)),
+        container(container(Space::new().width(Length::Fill).height(Length::Fill)).style(style))
+            .padding([0.0, 1.0])
+            .width(share(tile))
+            .height(Length::Fill),
+        Space::new().width(share(after)),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// Standard button padding: 32px tall with the body size.
@@ -1261,8 +1393,48 @@ mod tests {
     }
 
     #[test]
-    fn a_header_button_sits_as_far_from_the_edge_as_from_the_top() {
-        let inset = (t::HEADER_HEIGHT - 2.0 - t::CONTROL_HEIGHT_SM) / 2.0;
-        assert!(inset > 0.0 && inset < t::SPACE_2, "{inset}");
+    fn the_thumb_of_a_segmented_control_sits_over_its_share_of_the_width() {
+        // Three segments: the thumb is a third wide wherever it is, and what
+        // is before and after it always adds up to the other two thirds.
+        for position in [0.0, 0.25, 1.0, 1.5, 2.0] {
+            let [before, tile, after] = thumb_portions(position, 3);
+            assert_eq!(tile, 1000);
+            assert_eq!(before + after, 2000, "{position}");
+        }
+        // On a segment it is exactly whole segments in from the left.
+        assert_eq!(thumb_portions(0.0, 3), [0, 1000, 2000]);
+        assert_eq!(thumb_portions(1.0, 3), [1000, 1000, 1000]);
+        assert_eq!(thumb_portions(2.0, 3), [2000, 1000, 0]);
+        // Between two it is a proportion of the way.
+        assert_eq!(thumb_portions(0.5, 3), [500, 1000, 1500]);
+        // And never off either end, whatever a slide's easing overshoots to.
+        assert_eq!(thumb_portions(-1.0, 3), thumb_portions(0.0, 3));
+        assert_eq!(thumb_portions(9.0, 3), thumb_portions(2.0, 3));
+        // A control of one segment has nowhere to slide.
+        assert_eq!(thumb_portions(0.0, 1), [0, 1000, 0]);
+    }
+
+    #[test]
+    fn the_thumb_follows_a_thumb_through_a_whole_slide() {
+        let now = Instant::now();
+        let mut thumb = motion::Thumb::at(0);
+        thumb.select(2, now);
+        // Every frame of the slide puts the tile somewhere on the control,
+        // and it never runs back on itself.
+        let mut last = 0;
+        for step in 0..=20 {
+            let at = now + motion::STANDARD * step / 20;
+            let [before, _, after] = thumb_portions(thumb.position(at), 3);
+            assert!(before >= last);
+            assert_eq!(before + after, 2000);
+            last = before;
+        }
+        assert_eq!(last, 2000);
+    }
+
+    #[test]
+    fn a_header_has_room_for_a_control_above_and_below() {
+        let room = (t::HEADER_HEIGHT - t::CONTROL_HEIGHT_SM) / 2.0;
+        assert!(room >= t::SPACE_3, "{room}");
     }
 }

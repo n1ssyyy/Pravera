@@ -53,6 +53,7 @@ pub mod update;
 pub mod widget;
 
 mod setup;
+mod shot;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -185,7 +186,8 @@ pub fn run() -> iced::Result {
     // A preview stands beside the real one rather than deferring to it.
     if preview() {
         start_logging();
-        return launch(false, None);
+        // Taking pictures: a window that is never shown.
+        return launch(shot::dir().is_some(), None);
     }
 
     // One Pravera at a time — checked BEFORE logging. The old order
@@ -302,7 +304,7 @@ fn launch(hidden: bool, single_lock: Option<std::net::TcpListener>) -> iced::Res
     .font(t::font_at(t::EXTRA_WEIGHTS[1]))
     .default_font(t::FONT_UI)
     .window(iced::window::Settings {
-        size: WINDOW_SIZE,
+        size: shot::size().unwrap_or(WINDOW_SIZE),
         min_size: Some(WINDOW_MIN),
         icon: window_icon(),
         // The native chrome is replaced by `components::titlebar`, which has to
@@ -467,6 +469,13 @@ impl DisplayCheck {
 #[derive(Debug, Clone)]
 pub enum Message {
     Navigate(Screen),
+    /// Preview pictures: go to the step's page, take it, write it. See
+    /// [`shot`].
+    ShotNext(usize),
+    /// The change of a step that is photographed part way through.
+    ShotFire(usize),
+    ShotTake(usize),
+    ShotTaken(usize, iced::window::Screenshot),
     /// A discovery pass finished.
     Discovered(Box<Discovered>),
     Refresh,
@@ -858,6 +867,15 @@ struct Pravera {
     /// One animation per screen, answering "how selected is this entry". The
     /// highlight crossfades between them when the page changes.
     nav_active: Vec<iced::Animation<bool>>,
+    /// The rail's one highlight: where it set off from, in pixels down the
+    /// rail's column, the entry it is heading for (see [`rail_position`]), and
+    /// how far along that way it has got, 0 to 1. Setting off from a number of
+    /// pixels rather than from an entry means a slide that is interrupted
+    /// carries on from where the highlight is drawn, and the slide is one
+    /// steady movement however far the entry is.
+    rail_from: f32,
+    rail_to: f32,
+    rail_slide: Tween,
 
     home: screens::home::State,
     connect: screens::connect::State,
@@ -1025,12 +1043,20 @@ impl Pravera {
             if preview_dialog() {
                 state.connect.open_empty(state.now);
             }
+            let pictures = if shot::dir().is_some() {
+                iced::window::latest()
+                    .and_then(shot::park)
+                    .chain(Task::done(Message::ShotNext(0)))
+            } else {
+                Task::none()
+            };
             return (
                 state,
                 Task::batch([
                     iced::window::latest().map(Message::WindowReady),
                     Task::perform(host::displays(), Message::Displays),
                     read_at_sign_in(),
+                    pictures,
                 ]),
             );
         }
@@ -1141,6 +1167,9 @@ impl Pravera {
                 active[Screen::Home.index()] = motion::standard(true);
                 active
             },
+            rail_from: 0.0,
+            rail_to: rail_position(Screen::Home).unwrap_or(0.0),
+            rail_slide: Tween::at(1.0),
             home,
             connect,
             settings: screens::settings::State::new(),
@@ -1187,7 +1216,7 @@ impl Pravera {
 
     fn title(&self) -> String {
         match self.tabs.active() {
-            Some(tab) if self.on_surface() => format!("Pravera — {}", tab.title()),
+            Some(tab) if self.on_surface() => format!("Pravera - {}", tab.title()),
             _ => "Pravera".to_string(),
         }
     }
@@ -1223,6 +1252,56 @@ impl Pravera {
         }
 
         match message {
+            Message::ShotNext(step) => {
+                let Some(page) = shot::PLAN.get(step) else {
+                    return iced::exit();
+                };
+                if self.connect.is_open() {
+                    self.connect.dismiss(self.now);
+                }
+                match page {
+                    shot::Step::Screen(screen) => self.go_to(*screen),
+                    shot::Step::Connect => {
+                        self.go_to(Screen::Home);
+                        self.connect.open_empty(self.now);
+                    }
+                    shot::Step::Hover => {
+                        self.go_to(Screen::Home);
+                        self.home.set_hovered(0, true, self.now);
+                    }
+                    shot::Step::Section(section) => {
+                        self.go_to(Screen::Settings);
+                        self.settings.select(*section, self.now);
+                    }
+                    // Set the scene now, let it settle, then make the change.
+                    shot::Step::Caught(moment) => {
+                        match moment {
+                            shot::Moment::Leaving => self.go_to(Screen::Settings),
+                            shot::Moment::Arriving => self.go_to(Screen::Users),
+                            shot::Moment::Dialog | shot::Moment::Rail => self.go_to(Screen::Home),
+                        }
+                        return shot::before_firing(step);
+                    }
+                }
+                shot::after_settling(step)
+            }
+            Message::ShotFire(step) => {
+                let Some(shot::Step::Caught(moment)) = shot::PLAN.get(step) else {
+                    return Task::none();
+                };
+                match moment {
+                    shot::Moment::Leaving => self.go_to(Screen::Users),
+                    shot::Moment::Arriving => self.go_to(Screen::Transfers),
+                    shot::Moment::Dialog => self.connect.open_empty(self.now),
+                    shot::Moment::Rail => self.go_to(Screen::Settings),
+                }
+                shot::after_moment(step, *moment)
+            }
+            Message::ShotTake(step) => shot::take(step),
+            Message::ShotTaken(step, picture) => {
+                shot::save(step, &picture);
+                Task::done(Message::ShotNext(step + 1))
+            }
             Message::Navigate(screen) => {
                 self.go_to(screen);
                 // The Settings rows that snapshot the outside world are
@@ -1701,9 +1780,10 @@ impl Pravera {
     /// highlight, the page transition and the per-page refreshes cannot be
     /// forgotten by whichever path asked.
     ///
-    /// Between two pages the old one drifts up and fades on the exit curve,
-    /// then the new one's panels cascade in. Into a tab the surface fades up;
-    /// out of one the sidebar arrives again with the page.
+    /// Between two pages the sheet stays where it is: the old contents fade
+    /// out over [`motion::PAGE_OUT`], then the new header and blocks rise in.
+    /// The rail's highlight slides to the new item meanwhile. Into a tab the
+    /// surface fades up; out of one the sidebar arrives again with the page.
     fn go_to(&mut self, screen: Screen) {
         let now = self.now;
         // A session screen with no tab to show is nowhere to go: stay put.
@@ -1725,6 +1805,23 @@ impl Pravera {
             let animation = &mut self.nav_active[item.index()];
             if animation.value() != wanted {
                 animation.go_mut(wanted, now);
+            }
+        }
+
+        // The highlight slides to the item, from wherever it is drawn. Coming
+        // back from a tab it was not on screen, so it is simply there.
+        if let Some(to) = rail_position(screen) {
+            self.rail_from = if from_surface {
+                rail_y(to, self.rail_column())
+            } else {
+                self.rail_highlight_y(now)
+            };
+            self.rail_to = to;
+            if from_surface {
+                self.rail_slide.snap(1.0);
+            } else {
+                self.rail_slide.snap(0.0);
+                self.rail_slide.go(1.0, now, motion::STANDARD, motion::EASE_CHANGE);
             }
         }
 
@@ -1752,7 +1849,7 @@ impl Pravera {
                 self.leave.exit(now, motion::PAGE_OUT);
                 self.leave_ends = now + motion::PAGE_OUT;
             }
-            self.replay(screen, self.leave_ends - motion::STAGGER_FIRST);
+            self.replay(screen, self.leave_ends);
         }
 
         // Re-read rather than trusted: the account file is written by the
@@ -2137,6 +2234,7 @@ impl Pravera {
                 live.state.show(picture);
             }
             live.state.tick(self.now);
+            live.state.follow(&live.link, self.now);
 
             // Asked for the moment enough has been lost to be worth it: until
             // one arrives the picture stays visibly broken, so waiting
@@ -2513,6 +2611,7 @@ impl Pravera {
             auto: self.prefs.auto_update,
             enabled: self.updater.enabled,
             pending: self.updater.pending(),
+            brief: self.updater.brief(),
         }
     }
 
@@ -3298,6 +3397,7 @@ impl Pravera {
             || self.chrome_hover.is_animating(now)
             || self.tab_hover.is_animating(now)
             || self.nav_active.iter().any(|a| a.is_animating(now))
+            || self.rail_slide.is_animating(now)
             || self.leave.is_animating(now)
             || self.leaving.is_some()
             || self.toast.is_animating(now)
@@ -3395,8 +3495,17 @@ impl Pravera {
             Subscription::none()
         };
 
+        // A window that is never shown gets no frames; pictures still need
+        // the clock to move so every entrance finishes.
+        let shooting = if shot::dir().is_some() {
+            iced::time::every(Duration::from_millis(16)).map(Message::Tick)
+        } else {
+            Subscription::none()
+        };
+
         Subscription::batch([
             frames,
+            shooting,
             heartbeat,
             updates,
             terminals,
@@ -3484,12 +3593,18 @@ impl Pravera {
             None => Space::new().width(Length::Fill).height(Length::Fill).into(),
         };
         // A fade, no travel: the surface is the machine's own screen, and
-        // sliding it would suggest it came from somewhere.
+        // sliding it would suggest it came from somewhere. It fades from the
+        // colour it sits on: a picture's letterbox is black, a terminal's
+        // ground is the app's.
+        let ground = match self.tabs.active() {
+            Some(Tab::Session(_)) => t::LETTERBOX,
+            _ => t::BACKGROUND,
+        };
         motion::rise_on(
             surface,
-            motion::cascade(self.surface_at, self.now + motion::STAGGER_FIRST, 0),
+            motion::cascade(self.surface_at, self.now + motion::STAGGER_STEP, 0),
             0.0,
-            t::BACKGROUND,
+            ground,
         )
     }
 
@@ -3527,11 +3642,15 @@ impl Pravera {
             .into()
     }
 
-    /// The page, or the page on its way out.
+    /// The sheet, with the page on it, or the page on its way out.
     ///
-    /// Pages fill the space and scroll inside their own body cards, so the
-    /// window itself never scrolls and a header never slides up under the
-    /// title bar.
+    /// The sheet is drawn here, round whatever page is in front, and is the
+    /// same widget from one page to the next: it never moves and never fades.
+    /// Only its contents change, the old page fading out on the spot and the
+    /// new one rising in behind it.
+    ///
+    /// Pages fill the sheet and scroll inside their own bodies, so the window
+    /// itself never scrolls and a header never slides up under the title bar.
     fn content(&self) -> Element<'_, Message> {
         let now = self.now;
         let leaving = self.leaving.filter(|_| !self.leave.is_gone(now));
@@ -3544,16 +3663,14 @@ impl Pravera {
             .height(Length::Fill)
             .into();
 
-        match leaving {
+        let contents = match leaving {
             Some(_) => {
                 let amount = self.leave.value(now).clamp(0.0, 1.0);
-                Transform::new(keyed)
-                    .offset(Vector::new(0.0, -motion::PAGE_DRIFT * (1.0 - amount)))
-                    .fade(t::BACKGROUND, amount)
-                    .into()
+                Transform::new(keyed).fade(t::CARD, amount).into()
             }
             None => keyed,
-        }
+        };
+        components::sheet(contents)
     }
 
     fn page(&self, screen: Screen) -> Element<'_, Message> {
@@ -3624,7 +3741,16 @@ impl Pravera {
             rail = rail.push(self.rail_screen(screen));
         }
 
-        container(rail)
+        // One highlight for the whole rail, under the pills: it slides to the
+        // page in front rather than each pill lighting and dimming on its own.
+        // The pills stay clear at rest, so it shows through, and a pill grown
+        // by the pointer is opaque and covers it.
+        let mut layers = Stack::with_children([Element::from(rail)]).height(Length::Fill);
+        if self.screen != Screen::Session {
+            layers = layers.push_under(rail_highlight(self.rail_highlight_y(self.now)));
+        }
+
+        container(layers)
             .padding(Padding {
                 top: RAIL_TOP,
                 right: t::GAP,
@@ -3633,6 +3759,19 @@ impl Pravera {
             })
             .height(Length::Fill)
             .into()
+    }
+
+    /// How tall the rail's column is: the window under the title bar, less
+    /// what the rail is inset by at the top and the bottom.
+    fn rail_column(&self) -> f32 {
+        self.window_size.height - t::TITLEBAR_HEIGHT - RAIL_TOP - t::GAP
+    }
+
+    /// How far down the rail's column the highlight is drawn at `now`.
+    fn rail_highlight_y(&self, now: Instant) -> f32 {
+        let slide = self.rail_slide.value(now).clamp(0.0, 1.0);
+        let to = rail_y(self.rail_to, self.rail_column());
+        self.rail_from + (to - self.rail_from) * slide
     }
 
     fn rail_screen(&self, screen: Screen) -> Element<'_, Message> {
@@ -3646,11 +3785,11 @@ impl Pravera {
         // A transfer in flight marks its section, so it can be left running
         // and still be found again.
         if screen == Screen::Transfers && !self.running.is_empty() {
-            mark = badged(mark, t::LIME);
+            mark = components::badged(mark, t::LIME, t::BACKGROUND);
         }
         // A newer version waiting is worth a glance, not a dialog.
         if screen == Screen::Settings && self.updater.pending() {
-            mark = badged(mark, t::LIME);
+            mark = components::badged(mark, t::LIME, t::BACKGROUND);
         }
         rail_pill(mark, screen.label(), active, grow, index, Message::Navigate(screen))
     }
@@ -3753,7 +3892,7 @@ impl Pravera {
         .width(Length::Fixed(360.0))
         .opacity(amount)
         .shadow(iced::Shadow {
-            color: theme::faded(iced::Color::BLACK, 0.45 * amount),
+            color: theme::faded(t::SHADOW_INK, 0.45 * amount),
             ..theme::SHADOW_FLOAT
         });
 
@@ -3770,7 +3909,7 @@ impl Pravera {
 }
 
 /// How far the first pill sits below the title bar: centred on the page's
-/// header card, so the rail and the page start on one line.
+/// header, so the rail and the page start on one line.
 const RAIL_TOP: f32 = (t::HEADER_HEIGHT - t::RAIL_ITEM) / 2.0;
 
 /// The most characters a pill's label holds before it is cut short: what
@@ -3838,15 +3977,16 @@ fn rail_pill<'a>(
     ]
     .height(Length::Fill);
 
-    let rest = t::with_alpha(t::NEUTRAL_800, active);
-    let fill = theme::blend(rest, t::NEUTRAL_750, grow);
+    // Clear at rest: a chosen entry's tile is the rail's highlight, drawn
+    // under the pills, not a fill of the pill's own.
+    let fill = theme::blend(t::with_alpha(t::NEUTRAL_800, 0.0), t::NEUTRAL_750, grow);
     let ring = theme::blend(
-        t::with_alpha(t::NEUTRAL_700, active),
+        t::with_alpha(t::NEUTRAL_700, 0.0),
         theme::blend(t::NEUTRAL_700, t::NEUTRAL_600, 0.35),
         grow,
     );
     let shadow = iced::Shadow {
-        color: t::with_alpha(iced::Color::BLACK, 0.55 * grow),
+        color: t::with_alpha(t::SHADOW_INK, 0.55 * grow),
         offset: Vector::new(0.0, 8.0),
         blur_radius: 24.0,
     };
@@ -3877,6 +4017,78 @@ fn rail_pill<'a>(
         .into()
 }
 
+/// The tile under the chosen rail entry, `y` below the top of the rail's
+/// column.
+fn rail_highlight<'a>(y: f32) -> Element<'a, Message> {
+    container(
+        container(Space::new().width(Length::Fixed(t::RAIL_ITEM)).height(Length::Fixed(t::RAIL_ITEM))).style(
+            |_| container::Style {
+                background: Some(Background::Color(t::NEUTRAL_800)),
+                border: Border {
+                    color: t::NEUTRAL_700,
+                    width: 1.0,
+                    radius: t::RADIUS.into(),
+                },
+                ..container::Style::default()
+            },
+        ),
+    )
+    .padding(Padding {
+        top: y,
+        ..Padding::ZERO
+    })
+    .height(Length::Fill)
+    .into()
+}
+
+/// Where a screen's entry is among the rail's, counted from the top, or
+/// `None` for one the rail has no entry for. [`rail_y`] turns it into pixels.
+fn rail_position(screen: Screen) -> Option<f32> {
+    NAV.iter()
+        .flat_map(|run| run.iter())
+        .position(|&entry| entry == screen)
+        .map(|index| index as f32)
+}
+
+/// The height of the rail's rule, and the room round it.
+const RAIL_RULE: f32 = 1.0 + 2.0 * t::SPACE_1;
+
+/// Where each entry of [`NAV`] starts, in order, measured down the rail's
+/// column, which is `height` tall. The first two runs hang from the top; the
+/// last sits at the foot, above nothing, so it is measured up from the bottom.
+fn rail_tops(height: f32) -> Vec<f32> {
+    let step = t::RAIL_ITEM + t::SPACE_1;
+    let [reach, admin, foot] = NAV;
+    let mut tops = Vec::new();
+    let mut y = 0.0;
+    for _ in reach {
+        tops.push(y);
+        y += step;
+    }
+    y += RAIL_RULE + t::SPACE_1;
+    for _ in admin {
+        tops.push(y);
+        y += step;
+    }
+    for (index, _) in foot.iter().enumerate() {
+        let below = (foot.len() - index) as f32;
+        tops.push(height - t::RAIL_ITEM * below - t::SPACE_1 * (below - 1.0));
+    }
+    tops
+}
+
+/// How far down the rail's column the highlight is at `position`: exactly on
+/// an entry at a whole number, and a straight line between the two entries
+/// either side of it otherwise.
+fn rail_y(position: f32, height: f32) -> f32 {
+    let tops = rail_tops(height);
+    let last = tops.len() - 1;
+    let position = position.clamp(0.0, last as f32);
+    let low = position.floor() as usize;
+    let high = (low + 1).min(last);
+    tops[low] + (tops[high] - tops[low]) * (position - low as f32)
+}
+
 /// A short hairline between runs of rail entries, centred under the marks.
 fn rail_rule<'a>() -> Element<'a, Message> {
     container(
@@ -3892,8 +4104,6 @@ fn rail_rule<'a>() -> Element<'a, Message> {
     .into()
 }
 
-/// A mark with a small status dot on its top-right corner, ringed in the
-/// floor colour so it reads as sitting on the mark rather than in it.
 /// Fetch and check an update, reporting progress as it arrives.
 fn download_update(release: install::release::Release) -> Task<Message> {
     use iced::futures::SinkExt;
@@ -3908,33 +4118,6 @@ fn download_update(release: install::release::Release) -> Task<Message> {
         }),
         |message| message,
     )
-}
-
-fn badged<'a>(mark: Element<'a, Message>, tint: iced::Color) -> Element<'a, Message> {
-    const BOX: f32 = t::ICON + 6.0;
-    Stack::with_children([
-        container(mark)
-            .center_x(Length::Fixed(BOX))
-            .center_y(Length::Fixed(BOX))
-            .into(),
-        container(
-            container(Space::new().width(Length::Fixed(7.0)).height(Length::Fixed(7.0))).style(move |_| {
-                container::Style {
-                    background: Some(Background::Color(tint)),
-                    border: Border {
-                        color: t::BACKGROUND,
-                        width: 1.5,
-                        radius: t::RADIUS_FULL.into(),
-                    },
-                    ..container::Style::default()
-                }
-            }),
-        )
-        .align_right(Length::Fill)
-        .align_top(Length::Fill)
-        .into(),
-    ])
-    .into()
 }
 
 /// `words`, cut to `most` characters with an ellipsis when longer.
@@ -4300,6 +4483,108 @@ pub mod tests {
         app.now += motion::DIALOG_OUT + Duration::from_millis(1);
         app.expire_notice();
         assert!(app.fading_notice.is_none());
+    }
+
+    #[test]
+    fn the_highlight_sits_on_each_entry_and_slides_in_a_line_between_them() {
+        let height = 700.0;
+        let tops = rail_tops(height);
+        // One entry per screen the rail names, in the order it draws them.
+        assert_eq!(tops.len(), NAV.iter().map(|run| run.len()).sum::<usize>());
+        for (index, top) in tops.iter().enumerate() {
+            assert_eq!(rail_y(index as f32, height), *top);
+        }
+        // Devices is first, Transfers a square and a gap below it.
+        assert_eq!(tops[0], 0.0);
+        assert_eq!(tops[1], t::RAIL_ITEM + t::SPACE_1);
+        // Halfway between two entries is halfway between their tops.
+        let mid = rail_y(0.5, height);
+        assert!((mid - tops[1] / 2.0).abs() < 1e-4);
+        // And it never runs backwards on the way down.
+        let mut last = -1.0;
+        for step in 0..=40 {
+            let y = rail_y(step as f32 / 10.0, height);
+            assert!(y >= last);
+            last = y;
+        }
+        // Past either end it stays on the end.
+        assert_eq!(rail_y(-3.0, height), tops[0]);
+        assert_eq!(rail_y(99.0, height), *tops.last().unwrap());
+    }
+
+    #[test]
+    fn the_entry_at_the_foot_of_the_rail_is_measured_from_the_bottom() {
+        let settings = rail_position(Screen::Settings).unwrap();
+        // Two windows differing by 100px: Settings moves with the bottom, the
+        // entries at the top do not.
+        assert_eq!(rail_y(settings, 600.0) - rail_y(settings, 500.0), 100.0);
+        assert_eq!(rail_y(0.0, 600.0), rail_y(0.0, 500.0));
+        let users = rail_position(Screen::Users).unwrap();
+        assert_eq!(rail_y(users, 600.0), rail_y(users, 500.0));
+        // Its square ends exactly at the bottom of the column.
+        assert_eq!(rail_y(settings, 600.0) + t::RAIL_ITEM, 600.0);
+    }
+
+    #[test]
+    fn every_page_with_an_entry_has_a_position_and_the_session_screen_has_none() {
+        for screen in Screen::ALL {
+            let expected = screen != Screen::Session;
+            assert_eq!(rail_position(screen).is_some(), expected, "{screen:?}");
+        }
+    }
+
+    #[test]
+    fn a_page_change_slides_the_highlight_from_where_it_is_and_never_jumps() {
+        let mut app = Pravera::assemble(None, false);
+        let column = app.rail_column();
+        let home = rail_y(rail_position(Screen::Home).unwrap(), column);
+        let settings = rail_y(rail_position(Screen::Settings).unwrap(), column);
+        let users = rail_y(rail_position(Screen::Users).unwrap(), column);
+        assert_eq!(app.rail_highlight_y(app.now), home);
+
+        app.go_to(Screen::Settings);
+        // It starts out on the entry it left, and is in motion.
+        assert_eq!(app.rail_highlight_y(app.now), home);
+        assert!(app.rail_slide.is_animating(app.now));
+        // Part way it is between the two, neither on one nor the other.
+        let part = app.rail_highlight_y(app.now + motion::STANDARD / 3);
+        assert!(part > home && part < settings, "{part}");
+        // A change of mind mid-slide sets off from where it was drawn.
+        app.now += motion::STANDARD / 3;
+        let drawn = app.rail_highlight_y(app.now);
+        app.go_to(Screen::Users);
+        assert_eq!(app.rail_highlight_y(app.now), drawn);
+        app.now += motion::STANDARD + Duration::from_millis(1);
+        assert_eq!(app.rail_highlight_y(app.now), users);
+        assert!(!app.rail_slide.is_animating(app.now));
+    }
+
+    #[test]
+    fn a_slide_to_the_foot_of_the_rail_is_one_steady_movement_not_a_dash_at_the_end() {
+        let mut app = Pravera::assemble(None, false);
+        let column = app.rail_column();
+        let settings = rail_y(rail_position(Screen::Settings).unwrap(), column);
+        app.go_to(Screen::Settings);
+        // On the easing curve alone: nothing in the last quarter of the
+        // slide covers more of the distance than the curve itself does.
+        let at = |fraction: f32| {
+            (app.rail_highlight_y(app.now + motion::STANDARD.mul_f32(fraction)) - app.rail_highlight_y(app.now)) / settings
+        };
+        let curve = |fraction: f32| motion::EASE_CHANGE.value(fraction);
+        for fraction in [0.25, 0.5, 0.75, 1.0] {
+            assert!((at(fraction) - curve(fraction)).abs() < 1e-3, "{fraction}");
+        }
+    }
+
+    #[test]
+    fn coming_back_from_a_tab_finds_the_highlight_already_in_place() {
+        let mut app = Pravera::assemble(None, false);
+        app.go_to(Screen::Settings);
+        app.screen = Screen::Session;
+        app.go_to(Screen::Users);
+        let users = rail_y(rail_position(Screen::Users).unwrap(), app.rail_column());
+        assert_eq!(app.rail_highlight_y(app.now), users);
+        assert!(!app.rail_slide.is_animating(app.now));
     }
 
     #[test]

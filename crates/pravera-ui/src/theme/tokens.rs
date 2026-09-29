@@ -137,6 +137,14 @@ pub const ROUTE_DIRECT: Color = SUCCESS;
 pub const ROUTE_RELAY: Color = WARNING;
 pub const ROUTE_OFFLINE: Color = NEUTRAL_600;
 
+/// The black round a remote picture: the bars of a picture that is not the
+/// window's shape read as the edge of that screen, not as part of this
+/// interface, so they are not the app's background.
+pub const LETTERBOX: Color = rgb(0, 0, 0);
+
+/// The colour every shadow is cast in.
+pub const SHADOW_INK: Color = rgb(0, 0, 0);
+
 /// The scrim behind a dialog.
 pub const SCRIM: Color = with_alpha(rgb(0, 0, 0), 0.6);
 
@@ -232,8 +240,9 @@ pub const LIST_ROW: f32 = 36.0;
 pub const CONTROL_HEIGHT: f32 = 32.0;
 /// A compact control inside a dense row.
 pub const CONTROL_HEIGHT_SM: f32 = 28.0;
-/// A page's header card: DigiClip's `h-10`, the same on every page.
-pub const HEADER_HEIGHT: f32 = 40.0;
+/// A page's header, the top region of its sheet: the same on every page, and
+/// tall enough for a title at [`TEXT_LG`] with a control on either side of it.
+pub const HEADER_HEIGHT: f32 = 56.0;
 /// The widest a column of reading text is allowed to run.
 pub const READING_WIDTH: f32 = 760.0;
 /// Standard icon size.

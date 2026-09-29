@@ -336,6 +336,100 @@ pub fn ghost_button(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// A button style eased between its resting look and its hovered one, at
+/// `hover` from 0 to 1. Pressed and disabled buttons are not part of the ease:
+/// a press should answer at once, and a disabled control has no hover at all.
+///
+/// The hover is the number [`crate::widget::glide::Glide`] keeps for the
+/// control it wraps; without one around it, a style built with this stays at
+/// rest.
+pub fn glided(
+    style: fn(&Theme, button::Status) -> button::Style,
+    hover: f32,
+    theme: &Theme,
+    status: button::Status,
+) -> button::Style {
+    match status {
+        button::Status::Pressed | button::Status::Disabled => style(theme, status),
+        _ => blend_button(
+            style(theme, button::Status::Active),
+            style(theme, button::Status::Hovered),
+            hover,
+        ),
+    }
+}
+
+/// The style a wrapped control is given: [`glided`] over `style`, reading the
+/// hover as the control paints.
+pub fn gliding(
+    hover: crate::widget::glide::Hover,
+    style: fn(&Theme, button::Status) -> button::Style,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| glided(style, hover.get(), theme, status)
+}
+
+/// Every part of a button style, moved `amount` of the way from `from` to `to`.
+/// Shapes are not blended: the resting style's stay.
+pub fn blend_button(from: button::Style, to: button::Style, amount: f32) -> button::Style {
+    let fill = |style: &button::Style| match style.background {
+        Some(Background::Color(color)) => color,
+        _ => Color::TRANSPARENT,
+    };
+    let background = match (from.background, to.background) {
+        (None, None) => None,
+        (Some(Background::Color(_)) | None, Some(Background::Color(_)) | None) => {
+            Some(Background::Color(soften(fill(&from), fill(&to), amount)))
+        }
+        (other, _) => other,
+    };
+    button::Style {
+        background,
+        text_color: soften(from.text_color, to.text_color, amount),
+        border: Border {
+            color: soften(from.border.color, to.border.color, amount),
+            width: from.border.width + (to.border.width - from.border.width) * amount.clamp(0.0, 1.0),
+            ..from.border
+        },
+        shadow: Shadow {
+            color: soften(from.shadow.color, to.shadow.color, amount),
+            offset: Vector::new(
+                from.shadow.offset.x + (to.shadow.offset.x - from.shadow.offset.x) * amount.clamp(0.0, 1.0),
+                from.shadow.offset.y + (to.shadow.offset.y - from.shadow.offset.y) * amount.clamp(0.0, 1.0),
+            ),
+            blur_radius: from.shadow.blur_radius
+                + (to.shadow.blur_radius - from.shadow.blur_radius) * amount.clamp(0.0, 1.0),
+        },
+        ..from
+    }
+}
+
+/// [`blend`], except that a colour with no opacity has no hue to travel from:
+/// a fill that is clear at rest arrives as the hovered fill's own colour
+/// coming up from nothing, not as a muddy mix with black.
+fn soften(from: Color, to: Color, amount: f32) -> Color {
+    let from = if from.a == 0.0 { Color { a: 0.0, ..to } } else { from };
+    let to = if to.a == 0.0 { Color { a: 0.0, ..from } } else { to };
+    blend(from, to, amount)
+}
+
+/// A button style at `amount` of its strength: everything it paints, fill,
+/// edge and words, multiplied down together. For a control that fades in with
+/// the row it sits on.
+pub fn fade_button(style: button::Style, amount: f32) -> button::Style {
+    button::Style {
+        background: style.background.map(|background| match background {
+            Background::Color(color) => Background::Color(faded(color, amount)),
+            other => other,
+        }),
+        text_color: faded(style.text_color, amount),
+        border: Border {
+            color: faded(style.border.color, amount),
+            ..style.border
+        },
+        ..style
+    }
+}
+
 /// An action that destroys something. The only button allowed to be red.
 pub fn destructive_button(_: &Theme, status: button::Status) -> button::Style {
     let bg = match status {

@@ -42,8 +42,9 @@ use pravera_client::VideoStats;
 use pravera_core::{QualityProfile, Resolution};
 use pravera_proto::{InputEvent, KeyCode, MonitorId, PointerButton};
 
+use crate::components;
 use crate::icon;
-use crate::motion::{self, HoverTracker};
+use crate::motion;
 use crate::net::keys;
 use crate::net::link::{Command, Link};
 use crate::theme::{self, tokens as t};
@@ -67,16 +68,6 @@ const REVEAL_BAND: f32 = 0.10;
 /// banks the remainder, so an imperfect divisor loses nothing — it only makes
 /// slow scrolling take slightly more or less travel.
 const PIXELS_PER_DETENT: f32 = 50.0;
-
-// Slots in the shared hover tracker. The three quality profiles take 0..3, so
-// the fixed tools start after them and the monitor buttons after those.
-const TOOL_KEYBOARD: usize = 3;
-const TOOL_STATS: usize = 4;
-const TOOL_FILES: usize = 5;
-const TOOL_GAMING: usize = 6;
-const TOOL_SAS: usize = 7;
-const TOOL_DISCONNECT: usize = 8;
-const FIXED_TOOLS: usize = 9;
 
 /// Everything the person can do to a live session.
 #[derive(Debug, Clone)]
@@ -128,7 +119,6 @@ pub enum Message {
     /// Ask the host to generate Ctrl+Alt+Del.
     SendSas,
     Disconnect,
-    HoverTool(usize, bool),
 }
 
 /// What the screen keeps between redraws.
@@ -165,7 +155,12 @@ pub struct State {
     /// The pointer is on the toolbar itself.
     over_tools: bool,
 
-    hover: HoverTracker,
+    /// The tiles under the chosen quality profile and the chosen display, and
+    /// whether they have been put under the first choice yet: a session that
+    /// opens on Adaptive starts there rather than sliding to it.
+    quality_thumb: motion::Thumb,
+    display_thumb: motion::Thumb,
+    thumbs_synced: bool,
 
     /// Keys and buttons currently down on the *host*, so they can all be let
     /// go at once. A press that is never released is a modifier stuck on
@@ -210,7 +205,9 @@ impl Default for State {
             reveal_until: None,
             near_top: false,
             over_tools: false,
-            hover: HoverTracker::new(FIXED_TOOLS),
+            quality_thumb: motion::Thumb::at(0),
+            display_thumb: motion::Thumb::at(0),
+            thumbs_synced: false,
             held_keys: Vec::new(),
             held_buttons: Vec::new(),
             content: iced::Size::ZERO,
@@ -226,12 +223,39 @@ impl Default for State {
 
 impl State {
     /// Start a session, with the toolbar shown for long enough to read.
-    pub fn new(monitors: usize, now: Instant) -> State {
+    pub fn new(_monitors: usize, now: Instant) -> State {
         State {
             started: Some(now),
             reveal_until: Some(now + REVEAL_FOR),
-            hover: HoverTracker::new(FIXED_TOOLS + monitors),
             ..State::default()
+        }
+    }
+
+    /// Point the toolbar's tiles at the profile and the display the session is
+    /// on now, as the link reports them. A change slides them; the first look
+    /// puts them there.
+    pub fn follow(&mut self, link: &Link, now: Instant) {
+        let config = link.config();
+        let profile = QualityProfile::ALL
+            .iter()
+            .position(|&candidate| candidate == config.profile)
+            .unwrap_or(0);
+        let display = link
+            .monitors()
+            .iter()
+            .position(|monitor| monitor.id == config.monitor)
+            .unwrap_or(0);
+        self.choose(profile, display, now);
+    }
+
+    fn choose(&mut self, profile: usize, display: usize, now: Instant) {
+        if self.thumbs_synced {
+            self.quality_thumb.select(profile, now);
+            self.display_thumb.select(display, now);
+        } else {
+            self.quality_thumb.snap(profile);
+            self.display_thumb.snap(display);
+            self.thumbs_synced = true;
         }
     }
 
@@ -331,7 +355,8 @@ impl State {
         // notice. A session is redrawing for the video anyway.
         self.overlay.is_animating(now)
             || self.hint.is_animating(now)
-            || self.hover.is_animating(now)
+            || self.quality_thumb.is_animating(now)
+            || self.display_thumb.is_animating(now)
             || self.reveal_until.is_some_and(|until| now < until)
     }
 
@@ -557,11 +582,6 @@ pub fn update(state: &mut State, message: Message, now: Instant) -> Vec<Command>
             commands.push(Command::Disconnect);
             commands
         }
-
-        Message::HoverTool(index, entering) => {
-            state.hover.set(index, entering, now);
-            Vec::new()
-        }
     }
 }
 
@@ -574,6 +594,7 @@ pub fn view<'a>(state: &'a State, link: &'a Link, now: Instant) -> Element<'a, M
             video: Video::new(picture.clone()),
             resolution: picture.resolution,
             keyboard: state.keyboard,
+            hide_cursor: state.gaming,
         })
         .width(Length::Fill)
         .height(Length::Fill)
@@ -588,7 +609,7 @@ pub fn view<'a>(state: &'a State, link: &'a Link, now: Instant) -> Element<'a, M
             // Black rather than the app background: the letterbox bars around
             // a picture of a different shape read as the edge of the screen,
             // not as part of the interface.
-            background: Some(iced::Background::Color(Color::BLACK)),
+            background: Some(iced::Background::Color(t::LETTERBOX)),
             ..Default::default()
         });
 
@@ -708,7 +729,7 @@ fn waiting_words(host: &str, waited: Duration, stats: &VideoStats) -> (String, S
             format!(
                 "{} packets received and {} of them carried audio. Not one video frame has \
                  arrived, so there is nothing here to decode. The host's video pipeline \
-                 is producing nothing — its log names the stage (capture, encoder, or sends).",
+                 is producing nothing; its log names the stage (capture, encoder, or sends).",
                 stats.datagrams_received, stats.frames_audio
             ),
         );
@@ -785,7 +806,7 @@ fn overlay<'a>(
     let mut pill = row![
         identity(link, showing),
         divider(showing),
-        quality(state, link, now, showing),
+        quality(state, now, showing),
     ]
     .spacing(t::SPACE_3)
     .align_y(Alignment::Center);
@@ -797,50 +818,15 @@ fn overlay<'a>(
     }
 
     let tools = row![
-        tool(
-            icon::KEYBOARD,
-            TOOL_KEYBOARD,
-            state.keyboard,
-            state.hover.amount(TOOL_KEYBOARD, now),
-            showing,
-            Message::ToggleKeyboard,
-        ),
-        tool(
-            icon::GAUGE,
-            TOOL_STATS,
-            state.stats,
-            state.hover.amount(TOOL_STATS, now),
-            showing,
-            Message::ToggleStats,
-        ),
+        tool(icon::KEYBOARD, state.keyboard, showing, Message::ToggleKeyboard),
+        tool(icon::GAUGE, state.stats, showing, Message::ToggleStats),
         // Leaves the picture without ending the session. The session keeps
         // running in its own task while the file panes are on screen, which is
         // the whole reason files were kept off the control stream.
-        tool(
-            icon::TRANSFERS,
-            TOOL_FILES,
-            false,
-            state.hover.amount(TOOL_FILES, now),
-            showing,
-            Message::Files,
-        ),
-        tool(
-            icon::GAMEPAD,
-            TOOL_GAMING,
-            state.gaming,
-            state.hover.amount(TOOL_GAMING, now),
-            showing,
-            Message::ToggleGaming,
-        ),
-        tool(
-            icon::LOCK,
-            TOOL_SAS,
-            false,
-            state.hover.amount(TOOL_SAS, now),
-            showing,
-            Message::SendSas,
-        ),
-        end_session(state.hover.amount(TOOL_DISCONNECT, now), showing),
+        tool(icon::TRANSFERS, false, showing, Message::Files),
+        tool(icon::GAMEPAD, state.gaming, showing, Message::ToggleGaming),
+        tool(icon::LOCK, false, showing, Message::SendSas),
+        end_session(showing),
     ]
     .spacing(t::SPACE_1)
     .align_y(Alignment::Center);
@@ -873,13 +859,17 @@ fn overlay<'a>(
             radius: t::RADIUS_LG.into(),
         },
         shadow: iced::Shadow {
-            color: t::with_alpha(Color::BLACK, 0.45 * showing),
+            color: t::with_alpha(t::SHADOW_INK, 0.45 * showing),
             ..theme::SHADOW_FLOAT
         },
         ..Default::default()
     });
 
+    // An interaction of its own, so the stack stops here: without one the
+    // toolbar said "nothing", and the picture under it hid the pointer and
+    // took the moves meant for the buttons.
     let mut stacked = column![mouse_area(bar)
+        .interaction(mouse::Interaction::Idle)
         .on_enter(Message::OverTools(true))
         .on_exit(Message::OverTools(false))]
     .spacing(t::SPACE_2)
@@ -1050,186 +1040,167 @@ fn identity<'a>(link: &'a Link, showing: f32) -> Element<'a, Message> {
 }
 
 /// The three quality profiles as one segmented control.
-fn quality<'a>(
-    state: &'a State,
-    link: &'a Link,
-    now: Instant,
-    showing: f32,
-) -> Element<'a, Message> {
-    let current = link.config().profile;
-
-    QualityProfile::ALL
-        .iter()
-        .enumerate()
-        .fold(row![].spacing(1.0), |bar, (index, &profile)| {
-            bar.push(segment(
-                profile_label(profile),
-                index,
-                profile == current,
-                state.hover.amount(index, now),
-                showing,
-                Message::Profile(profile),
-            ))
-        })
-        .into()
+fn quality<'a>(state: &'a State, now: Instant, showing: f32) -> Element<'a, Message> {
+    segments(
+        QualityProfile::ALL
+            .iter()
+            .map(|&profile| (profile_label(profile), Message::Profile(profile)))
+            .collect(),
+        &state.quality_thumb,
+        now,
+        showing,
+    )
 }
 
 /// The displays, when there is more than one and this login may see them.
-fn displays<'a>(
-    state: &'a State,
-    link: &'a Link,
+fn displays<'a>(state: &'a State, link: &'a Link, now: Instant, showing: f32) -> Element<'a, Message> {
+    segments(
+        link.monitors()
+            .iter()
+            .enumerate()
+            .map(|(index, monitor)| {
+                (
+                    // The host's own name for the display, shortened to what
+                    // fits a segment. Numbering them here would invent a
+                    // numbering the host does not use.
+                    short_name(&monitor.name, index),
+                    Message::Monitor(monitor.id),
+                )
+            })
+            .collect(),
+        &state.display_thumb,
+        now,
+        showing,
+    )
+}
+
+/// The gap between one cell of a segmented control and the next.
+const SEGMENT_GAP: f32 = 1.0;
+
+/// JetBrains Mono's advance, in ems. Every weight has the same one, so a
+/// label's width is its length in characters however heavy it is set, which
+/// is what lets a control be laid out without measuring any text.
+const MONO_ADVANCE: f32 = 0.6;
+
+/// How wide every cell of a control is when its longest label is `longest`
+/// characters: the label and the room either side of it. One width for all,
+/// so the tile that slides under the chosen one is a fixed size.
+fn cell_width(longest: usize) -> f32 {
+    longest as f32 * MONO_ADVANCE * t::TEXT_XS + 2.0 * t::SPACE_3
+}
+
+/// How far in from the left of the control the tile is when it is
+/// `position` cells along: on a cell exactly at a whole number.
+fn tile_x(position: f32, width: f32) -> f32 {
+    position * (width + SEGMENT_GAP)
+}
+
+/// One choice of a few, as one control: cells all of one width, and a tile that
+/// slides under the one chosen.
+fn segments<'a>(
+    choices: Vec<(String, Message)>,
+    thumb: &motion::Thumb,
     now: Instant,
     showing: f32,
 ) -> Element<'a, Message> {
-    let current = link.config().monitor;
+    let width = cell_width(choices.iter().map(|(label, _)| label.chars().count()).max().unwrap_or(0));
 
-    link.monitors()
-        .iter()
-        .enumerate()
-        .fold(row![].spacing(1.0), |bar, (index, monitor)| {
-            let slot = FIXED_TOOLS + index;
-            bar.push(segment(
-                // The host's own name for the display, shortened to what fits
-                // a segment. Numbering them here would invent a numbering the
-                // host does not use.
-                short_name(&monitor.name, index),
-                slot,
-                monitor.id == current,
-                state.hover.amount(slot, now),
-                showing,
-                Message::Monitor(monitor.id),
-            ))
-        })
-        .into()
-}
+    let mut cells = row![].spacing(SEGMENT_GAP);
+    for (index, (label, message)) in choices.into_iter().enumerate() {
+        // How much of the tile is under this cell: its words light with it,
+        // and it stops lifting for the pointer once the tile is there.
+        let held = thumb.amount(index, now);
+        let chosen = thumb.chosen() == index;
+        cells = cells.push(components::glide(move |hover| {
+            button(
+                container(text(label).size(t::TEXT_XS).wrapping(text::Wrapping::None).font(if chosen {
+                    t::FONT_UI_STRONG
+                } else {
+                    t::FONT_UI
+                }))
+                .center_x(Length::Fill),
+            )
+            .width(Length::Fixed(width))
+            .padding([t::SPACE_1, 0.0])
+            .style(move |_, status| {
+                let lift = hover.get() * (1.0 - held);
+                let background = match status {
+                    button::Status::Pressed => t::ACCENT,
+                    _ => t::with_alpha(t::SECONDARY, 0.75 * lift),
+                };
+                let ink = theme::blend(theme::blend(t::MUTED_FOREGROUND, t::FOREGROUND, hover.get()), t::FOREGROUND, held);
+                button::Style {
+                    background: Some(iced::Background::Color(t::with_alpha(background, background.a * showing))),
+                    text_color: t::with_alpha(ink, showing),
+                    border: iced::Border {
+                        radius: t::RADIUS_SM.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press(message)
+            .into()
+        }));
+    }
 
-/// One cell of a segmented control.
-fn segment<'a>(
-    label: String,
-    _index: usize,
-    active: bool,
-    hover: f32,
-    showing: f32,
-    message: Message,
-) -> Element<'a, Message> {
-    let background = if active {
-        t::SECONDARY
-    } else {
-        t::with_alpha(t::SECONDARY, 0.75 * hover)
-    };
-    let foreground = if active {
-        t::FOREGROUND
-    } else {
-        blend(t::MUTED_FOREGROUND, t::FOREGROUND, hover)
-    };
-
-    button(text(label).size(t::TEXT_XS).font(if active {
-        t::FONT_UI_STRONG
-    } else {
-        t::FONT_UI
-    }))
-    .padding([t::SPACE_1, t::SPACE_2])
-    .style(move |_, status| {
-        let background = match status {
-            button::Status::Pressed => t::ACCENT,
-            _ => background,
-        };
-        button::Style {
-            background: Some(iced::Background::Color(t::with_alpha(
-                background,
-                background.a * showing,
-            ))),
-            text_color: t::with_alpha(foreground, showing),
+    let tile = container(Space::new().width(Length::Fixed(width)).height(Length::Fill)).style(move |_| {
+        container::Style {
+            background: Some(iced::Background::Color(t::with_alpha(t::SECONDARY, showing))),
             border: iced::Border {
                 radius: t::RADIUS_SM.into(),
                 ..Default::default()
             },
             ..Default::default()
         }
-    })
-    .on_press(message)
-    .into()
+    });
+    let under = row![Space::new().width(Length::Fixed(tile_x(thumb.position(now), width))), tile].height(Length::Fill);
+
+    iced::widget::Stack::with_children([Element::from(cells)])
+        .push_under(under)
+        .into()
 }
 
 /// A square icon button that can be on or off.
-fn tool<'a>(
-    glyph: &'static str,
-    _slot: usize,
-    active: bool,
-    hover: f32,
-    showing: f32,
-    message: Message,
-) -> Element<'a, Message> {
-    let background = if active {
-        t::SECONDARY
-    } else {
-        t::with_alpha(t::SECONDARY, 0.75 * hover)
-    };
-    let tint = if active {
-        t::FOREGROUND
-    } else {
-        blend(t::SUBTLE_FOREGROUND, t::FOREGROUND, hover)
-    };
-
-    button(icon::stroked(glyph, 14.0, t::with_alpha(tint, showing)))
-        .padding([5.0, t::SPACE_2])
-        .style(move |_, status| {
-            let background = match status {
-                button::Status::Pressed => t::ACCENT,
-                _ => background,
-            };
-            button::Style {
-                background: Some(iced::Background::Color(t::with_alpha(
-                    background,
-                    background.a * showing,
-                ))),
-                border: iced::Border {
-                    radius: t::RADIUS_SM.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
-        })
-        .on_press(message)
-        .into()
+fn tool<'a>(glyph: &'static str, active: bool, showing: f32, message: Message) -> Element<'a, Message> {
+    let tint = if active { t::FOREGROUND } else { t::SUBTLE_FOREGROUND };
+    components::glide(move |hover| {
+        button(icon::stroked(glyph, 14.0, t::with_alpha(tint, showing)))
+            .padding([5.0, t::SPACE_2])
+            .style(move |theme, status| {
+                let mut style = theme::glided(theme::ghost_button, hover.get(), theme, status);
+                if active && !matches!(status, button::Status::Pressed) {
+                    style.background = Some(iced::Background::Color(t::SECONDARY));
+                }
+                style.border.radius = t::RADIUS_SM.into();
+                theme::fade_button(style, showing)
+            })
+            .on_press(message)
+            .into()
+    })
 }
 
 /// Ending the session is the one destructive control here, and it is the only
 /// one that carries a word as well as a mark.
-fn end_session<'a>(hover: f32, showing: f32) -> Element<'a, Message> {
-    let tint = blend(t::MUTED_FOREGROUND, t::DESTRUCTIVE_FOREGROUND, hover);
-    let background = t::with_alpha(t::DESTRUCTIVE, 0.9 * hover);
-
-    button(
-        row![
-            icon::stroked(icon::DISCONNECT, 14.0, t::with_alpha(tint, showing)),
-            text("End")
-                .size(t::TEXT_XS)
-                .style(theme::tinted(t::with_alpha(tint, showing))),
-        ]
-        .spacing(t::SPACE_1)
-        .align_y(Alignment::Center),
-    )
-    .padding([t::SPACE_2, t::SPACE_2])
-    .style(move |_, status| {
-        let background = match status {
-            button::Status::Pressed => t::DESTRUCTIVE,
-            _ => background,
-        };
-        button::Style {
-            background: Some(iced::Background::Color(t::with_alpha(
-                background,
-                background.a * showing,
-            ))),
-            border: iced::Border {
-                radius: t::RADIUS_SM.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+fn end_session<'a>(showing: f32) -> Element<'a, Message> {
+    components::glide(move |hover| {
+        button(
+            row![
+                icon::stroked(icon::DISCONNECT, 14.0, t::with_alpha(t::DESTRUCTIVE_TEXT, showing)),
+                text("End").size(t::TEXT_XS),
+            ]
+            .spacing(t::SPACE_1)
+            .align_y(Alignment::Center),
+        )
+        .padding([t::SPACE_2, t::SPACE_2])
+        .style(move |theme, status| {
+            let mut style = theme::glided(theme::danger_ghost_button, hover.get(), theme, status);
+            style.border.radius = t::RADIUS_SM.into();
+            theme::fade_button(style, showing)
+        })
+        .on_press(Message::Disconnect)
+        .into()
     })
-    .on_press(Message::Disconnect)
-    .into()
 }
 
 /// The measurement panel.
@@ -1393,6 +1364,9 @@ struct Surface {
     /// forwarded; the keyboard is the one that has to be lent back so the
     /// person can use their own machine.
     keyboard: bool,
+    /// Whether the local pointer disappears over the picture. Only in gaming
+    /// mode, where the pointer is confined and the game draws its own.
+    hide_cursor: bool,
 }
 
 impl shader::Program<Message> for Surface {
@@ -1532,13 +1506,20 @@ impl shader::Program<Message> for Surface {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        // The host composites its own cursor into the captured picture, so a
-        // local arrow on top of it would be a second pointer chasing the first.
+        // The host composites its cursor into the picture when Windows is
+        // drawing one, but a host with no mouse attached (a headless box on a
+        // virtual display) has none to draw, a view-only session never moves
+        // it, and an elevated window on the host refuses to. Hiding the local
+        // arrow on the strength of a cursor that may not be there left people
+        // with no pointer at all. A second arrow that trails the first by a
+        // frame is the lesser problem, until the host sends its cursor's shape
+        // and the viewer draws it.
         match cursor
             .position()
             .and_then(|p| point_in(bounds, self.resolution, p))
         {
-            Some(_) => mouse::Interaction::Hidden,
+            Some(_) if self.hide_cursor => mouse::Interaction::Hidden,
+            Some(_) => mouse::Interaction::Idle,
             // Over a letterbox bar: this is the app's own surface again.
             None => mouse::Interaction::None,
         }
@@ -1639,16 +1620,6 @@ fn route_label(kind: pravera_transport::RouteKind) -> &'static str {
     match kind {
         RouteKind::Direct => "direct",
         RouteKind::Relay => "relayed",
-    }
-}
-
-fn blend(from: Color, to: Color, amount: f32) -> Color {
-    let k = amount.clamp(0.0, 1.0);
-    Color {
-        r: from.r + (to.r - from.r) * k,
-        g: from.g + (to.g - from.g) * k,
-        b: from.b + (to.b - from.b) * k,
-        a: from.a + (to.a - from.a) * k,
     }
 }
 
@@ -2149,11 +2120,41 @@ mod tests {
     }
 
     #[test]
-    fn every_quality_profile_has_a_slot_of_its_own_below_the_fixed_tools() {
-        // The segmented control and the icon buttons share one hover tracker,
-        // and an overlap would light the wrong control up.
-        assert!(QualityProfile::ALL.len() <= TOOL_KEYBOARD);
-        assert_eq!(FIXED_TOOLS, TOOL_DISCONNECT + 1);
+    fn every_cell_of_a_control_is_as_wide_as_its_longest_label_needs() {
+        // Seven characters of monospace at the small size, and the room either
+        // side, and no measuring of anything.
+        let width = cell_width(8);
+        assert!(width > 8.0 * t::TEXT_XS * 0.6);
+        assert_eq!(width, 8.0 * 0.6 * t::TEXT_XS + 2.0 * t::SPACE_3);
+        // More characters, wider; never narrower than the room alone.
+        assert!(cell_width(9) > cell_width(8));
+        assert_eq!(cell_width(0), 2.0 * t::SPACE_3);
+    }
+
+    #[test]
+    fn the_tile_sits_exactly_under_the_cell_it_is_on_and_between_two_on_the_way() {
+        let width = cell_width(8);
+        for index in 0..3 {
+            // Cell `index` starts after `index` cells and the gaps between them.
+            assert_eq!(tile_x(index as f32, width), index as f32 * width + index as f32 * SEGMENT_GAP);
+        }
+        let halfway = tile_x(0.5, width);
+        assert!(halfway > tile_x(0.0, width) && halfway < tile_x(1.0, width));
+    }
+
+    #[test]
+    fn the_first_look_at_the_link_puts_the_tiles_there_and_a_later_change_slides_them() {
+        let now = Instant::now();
+        let mut state = State::new(2, now);
+        state.choose(1, 1, now);
+        assert_eq!(state.quality_thumb.position(now), 1.0);
+        assert!(!state.is_animating(now + REVEAL_FOR * 2));
+
+        state.choose(2, 1, now);
+        assert!(state.quality_thumb.is_animating(now));
+        assert!(!state.display_thumb.is_animating(now));
+        let part = state.quality_thumb.position(now + motion::STANDARD / 3);
+        assert!(part > 1.0 && part < 2.0, "{part}");
     }
 
     // ------------------------------------------------------ waiting screen

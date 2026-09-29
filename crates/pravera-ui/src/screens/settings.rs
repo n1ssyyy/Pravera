@@ -24,14 +24,14 @@
 
 use std::time::Instant;
 
-use iced::widget::{button, column, container, mouse_area, row, text, text_input};
+use iced::widget::{button, column, container, keyed_column, mouse_area, row, text, text_input};
 use iced::{Alignment, Background, Border, Element, Length};
 
 use pravera_core::DeviceId;
 
 use crate::components::{self, Tone};
 use crate::icon;
-use crate::motion::{self, HoverTracker};
+use crate::motion::{self, HoverTracker, Tween};
 use crate::net::host::Hosting;
 use crate::theme::{self, tokens as t};
 
@@ -78,9 +78,13 @@ pub enum Message {
     RestartToUpdate,
     /// Whether a downloaded update may be applied without asking.
     ToggleAutoUpdate,
+    /// Show another section.
+    Section(Section),
+    /// The pointer moved onto, or off of, an entry in the section list.
+    HoverNav(usize, bool),
 }
 
-/// What the Updates group shows. Worked out by the application, which owns
+/// What the Updates section shows. Worked out by the application, which owns
 /// the updater; this screen only draws it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Updates {
@@ -93,6 +97,8 @@ pub struct Updates {
     pub enabled: bool,
     /// A newer version is on its way or waiting.
     pub pending: bool,
+    /// The state in a few words, for the section list.
+    pub brief: String,
 }
 
 /// The one button the Updates group offers.
@@ -199,6 +205,18 @@ pub struct State {
     /// Whether this machine encodes in hardware; `None` until the probe,
     /// which loads Media Foundation and is kept off the drawing path.
     hardware: Option<bool>,
+    /// The section on show, and when it came on show.
+    section: Section,
+    section_at: Instant,
+    /// One hover per entry of the section list.
+    nav_hover: HoverTracker,
+    /// One hold per entry: 1 for the section on show, 0 for the rest, each
+    /// moving on its own clock so the highlight crossfades between entries.
+    nav_active: [Tween; Section::ALL.len()],
+    /// The role that was chosen before this one, and how far the hand-over from
+    /// it to the current one has got.
+    previous_role: Option<String>,
+    role_swap: Tween,
 }
 
 impl Default for State {
@@ -218,6 +236,12 @@ impl Default for State {
             arrived: Instant::now(),
             switches: std::collections::HashMap::new(),
             hardware: None,
+            section: Section::Hosting,
+            section_at: Instant::now(),
+            nav_hover: HoverTracker::new(Section::ALL.len()),
+            nav_active: std::array::from_fn(|index| Tween::at(if index == 0 { 1.0 } else { 0.0 })),
+            previous_role: None,
+            role_swap: Tween::at(1.0),
         }
     }
 }
@@ -314,13 +338,49 @@ impl State {
 
     pub fn is_animating(&self, now: Instant) -> bool {
         self.hover.is_animating(now)
+            || self.nav_hover.is_animating(now)
+            || self.nav_active.iter().any(|hold| hold.is_animating(now))
+            || self.role_swap.is_animating(now)
             || self.switches.values().any(|a| a.is_animating(now))
             || motion::cascading(self.arrived, now)
+            || motion::cascading(self.section_at, now)
     }
 
     /// Start the page's entrance at `at`.
     pub fn replay(&mut self, at: Instant) {
         self.arrived = at;
+        self.section_at = at;
+    }
+
+    /// The section on show.
+    pub fn section(&self) -> Section {
+        self.section
+    }
+
+    /// Show `section`: the highlight hands over from the one before, and the
+    /// section's own blocks arrive again.
+    pub fn select(&mut self, section: Section, now: Instant) {
+        if section == self.section {
+            return;
+        }
+        let left = self.section.index();
+        self.nav_active[left].go(0.0, now, motion::STANDARD, motion::EASE_CHANGE);
+        self.nav_active[section.index()].go(1.0, now, motion::STANDARD, motion::EASE_CHANGE);
+        self.section = section;
+        self.section_at = now;
+    }
+
+    /// How chosen the role called `name` looks, from 0 to 1: rising for the one
+    /// just picked, falling for the one it replaced, and 0 for the rest.
+    fn role_amount(&self, name: &str, now: Instant) -> f32 {
+        let swap = self.role_swap.value(now).clamp(0.0, 1.0);
+        if self.role == name {
+            swap
+        } else if self.previous_role.as_deref() == Some(name) {
+            1.0 - swap
+        } else {
+            0.0
+        }
     }
 
     /// What the video encoder probe found.
@@ -387,7 +447,19 @@ pub fn update(state: &mut State, message: Message, now: Instant) -> Option<Messa
             None
         }
         Message::Role(role) => {
-            state.role = role;
+            if state.role != role {
+                state.previous_role = Some(std::mem::replace(&mut state.role, role));
+                state.role_swap.snap(0.0);
+                state.role_swap.go(1.0, now, motion::STANDARD, motion::EASE_CHANGE);
+            }
+            None
+        }
+        Message::Section(section) => {
+            state.select(section, now);
+            None
+        }
+        Message::HoverNav(index, entering) => {
+            state.nav_hover.set(index, entering, now);
             None
         }
         Message::Hover(slot, entering) => {
@@ -409,6 +481,60 @@ pub fn update(state: &mut State, message: Message, now: Instant) -> Option<Messa
         }
     }
 }
+
+/// The sections of the page, in the order the navigation lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    Hosting,
+    Displays,
+    Unattended,
+    Updates,
+    Machine,
+}
+
+impl Section {
+    pub const ALL: [Section; 5] = [
+        Section::Hosting,
+        Section::Displays,
+        Section::Unattended,
+        Section::Updates,
+        Section::Machine,
+    ];
+
+    pub fn index(self) -> usize {
+        Section::ALL.iter().position(|other| *other == self).unwrap_or(0)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::Hosting => "Hosting",
+            Section::Displays => "Displays",
+            Section::Unattended => "Unattended",
+            Section::Updates => "Updates",
+            Section::Machine => "This machine",
+        }
+    }
+
+    /// What the section is for, under its title.
+    fn about(self) -> &'static str {
+        match self {
+            Section::Hosting => "Whether this machine accepts sessions, and who may sign in.",
+            Section::Displays => "What hosting can capture, and how a machine with no monitor gets a screen.",
+            Section::Unattended => "Whether this machine comes back, and starts hosting, with nobody at it.",
+            Section::Updates => "Which version this is, and whether a newer one is on its way.",
+            Section::Machine => "Who this machine is, and what it encodes with.",
+        }
+    }
+}
+
+/// Width of the section list down the left of the page.
+const NAV_WIDTH: f32 = 208.0;
+
+/// Height of one entry in it: a name over a short state.
+const NAV_ROW: f32 = 48.0;
+
+/// The box every entry's mark sits in, wide enough for a badge on a glyph.
+const NAV_MARK: f32 = t::ICON + 6.0;
 
 pub fn view<'a>(
     state: &'a State,
@@ -433,44 +559,226 @@ pub fn view<'a>(
                 .style(theme::subtle),
         );
 
-    // One column of groups, held to a reading width: a settings page is read
-    // top to bottom, and a line of prose the width of a wide window is one
-    // nobody finishes. Hosting first, because it is why anyone comes here.
-    //
-    // The groups rise inside the card, so they fade over the card's colour
-    // rather than the page's.
-    let rise = |group, index| motion::rise_on(group, motion::cascade(since, now, index), motion::PANEL_RISE, t::CARD);
-    let groups = column![
-        rise(hosting_group(state, hosting, unattended.displays, now), 1),
-        rise(displays_group(state, unattended), 2),
-        rise(unattended_group(state, unattended, now), 3),
-        rise(updates_group(state, updates, now), 4),
-        rise(machine_group(state, device_id), 5),
-    ]
-    .spacing(t::SPACE_8)
-    .width(Length::Fill);
+    let nav = nav(state, hosting, unattended, updates, device_id, now);
 
-    components::page(
-        motion::rise(header, motion::cascade(since, now, 0)),
-        components::reading_body(groups),
+    // Only the chosen section is drawn, keyed by it so that its scroll position
+    // is its own and it opens at the top. Its blocks arrive one after another.
+    let section = state.section;
+    let blocks = match section {
+        Section::Hosting => hosting_blocks(state, hosting, unattended.displays, now),
+        Section::Displays => displays_blocks(state, unattended),
+        Section::Unattended => unattended_blocks(state, unattended, now),
+        Section::Updates => updates_blocks(state, updates, now),
+        Section::Machine => machine_blocks(state, device_id),
+    };
+    let mut pane = column![].spacing(t::SPACE_6).width(Length::Fill);
+    for (index, block) in std::iter::once(title(section)).chain(blocks).enumerate() {
+        pane = pane.push(motion::settle(
+            block,
+            motion::row_cascade(state.section_at, now, 0, index),
+        ));
+    }
+    let content = keyed_column([(section.index(), components::leading_body(pane))])
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    components::page_split(
+        motion::settle(header, motion::cascade(since, now, 0)),
+        motion::settle(nav, motion::cascade(since, now, 1)),
+        NAV_WIDTH,
+        content,
     )
+}
+
+/// A section's name and what it is for.
+fn title<'a>(section: Section) -> Element<'a, Message> {
+    column![
+        text(section.label())
+            .size(t::TEXT_LG)
+            .font(t::FONT_UI_STRONG)
+            .style(theme::heading),
+        text(section.about()).size(t::TEXT_XS).style(theme::muted),
+    ]
+    .spacing(t::SPACE_1_5)
+    .into()
+}
+
+// ------------------------------------------------------------------ the list
+
+/// The sections down the left, each with what state it is in, so the list is a
+/// summary of the page as well as the way around it.
+fn nav<'a>(
+    state: &'a State,
+    hosting: Option<&Hosting>,
+    unattended: &Unattended,
+    updates: &Updates,
+    device_id: Option<DeviceId>,
+    now: Instant,
+) -> Element<'a, Message> {
+    let mut list = column![].spacing(2.0).width(Length::Fill);
+    for (index, section) in Section::ALL.into_iter().enumerate() {
+        let (mark, brief): (Element<'a, Message>, String) = match section {
+            Section::Hosting => (
+                components::dot(if hosting.is_some() { t::LIME } else { t::ROUTE_OFFLINE }, 8.0),
+                match hosting {
+                    None => "Off".to_string(),
+                    Some(hosting) => match hosting.connections() {
+                        0 => "Ready".to_string(),
+                        n => format!("{n} connected"),
+                    },
+                },
+            ),
+            Section::Displays => (
+                icon::stroked(icon::DEVICES, t::ICON_SM, t::MUTED_FOREGROUND),
+                match unattended.displays {
+                    None => "Checking".to_string(),
+                    Some(0) => "None found".to_string(),
+                    Some(1) => "1 display".to_string(),
+                    Some(n) => format!("{n} displays"),
+                },
+            ),
+            Section::Unattended => (
+                icon::stroked(icon::BOLT, t::ICON_SM, t::MUTED_FOREGROUND),
+                if unattended.service == Service::Installed {
+                    "At boot".to_string()
+                } else if unattended.at_sign_in {
+                    "At sign-in".to_string()
+                } else {
+                    "Off".to_string()
+                },
+            ),
+            Section::Updates => {
+                let glyph = icon::stroked(icon::DOWNLOAD, t::ICON_SM, t::MUTED_FOREGROUND);
+                (
+                    if updates.pending {
+                        components::badged(glyph, t::LIME, t::CARD)
+                    } else {
+                        glyph
+                    },
+                    updates.brief.clone(),
+                )
+            }
+            Section::Machine => (
+                icon::stroked(icon::LOGO, t::ICON_SM, t::MUTED_FOREGROUND),
+                device_id.map_or_else(|| "unavailable".to_string(), |id| short_id(&id.to_string())),
+            ),
+        };
+        list = list.push(nav_row(
+            index,
+            section,
+            mark,
+            brief,
+            state.nav_hover.amount(index, now),
+            state.nav_active[index].value(now),
+        ));
+    }
+    container(list)
+        .padding([t::SPACE_3, t::SPACE_2])
+        .width(Length::Fill)
+        .into()
+}
+
+/// The start of a long identifier: enough to recognise it by.
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// One entry. Its fill is the sum of two animations: a lift while the pointer
+/// is on it, and a hold while it is the section on screen, so the highlight
+/// crossfades from the entry left to the entry chosen.
+fn nav_row<'a>(
+    index: usize,
+    section: Section,
+    mark: Element<'a, Message>,
+    brief: String,
+    hover: f32,
+    active: f32,
+) -> Element<'a, Message> {
+    let ink = theme::blend(theme::blend(t::NEUTRAL_300, t::FOREGROUND, hover), t::FOREGROUND, active);
+    let body = row![
+        container(mark)
+            .center_x(Length::Fixed(NAV_MARK))
+            .center_y(Length::Fixed(NAV_MARK)),
+        column![
+            text(section.label())
+                .size(t::TEXT_SM)
+                .font(t::FONT_UI_MEDIUM)
+                .wrapping(text::Wrapping::None)
+                .style(theme::tinted(ink)),
+            text(brief)
+                .size(t::TEXT_XS)
+                .font(t::FONT_MONO)
+                .wrapping(text::Wrapping::None)
+                .style(theme::subtle),
+        ]
+        .spacing(2.0)
+        .width(Length::Fill),
+    ]
+    .spacing(t::SPACE_2)
+    .align_y(Alignment::Center);
+
+    let surface = button(container(body).center_y(Length::Fill).width(Length::Fill).height(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fixed(NAV_ROW))
+        .padding([0.0, t::SPACE_2 + 2.0])
+        .style(move |_, status| button::Style {
+            background: Some(Background::Color(match status {
+                button::Status::Pressed => theme::blend(t::NEUTRAL_825, t::NEUTRAL_850, 0.5 + 0.5 * active),
+                _ => theme::blend(t::with_alpha(t::NEUTRAL_800, 0.7 * hover), t::SELECTED, active),
+            })),
+            text_color: ink,
+            border: Border {
+                color: t::with_alpha(t::BEVEL_RAISED.sides, active),
+                width: 1.0,
+                radius: t::RADIUS.into(),
+            },
+            ..button::Style::default()
+        })
+        .on_press(Message::Section(section));
+
+    mouse_area(surface)
+        .on_enter(Message::HoverNav(index, true))
+        .on_exit(Message::HoverNav(index, false))
+        .into()
 }
 
 // -------------------------------------------------------------------- groups
 
+/// A labelled run of rows: the label, a hairline, and each row split from the
+/// next by another. There is no box around it; the rules and the label are what
+/// say where it starts and ends.
+fn group<'a>(label: &str, rows: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    let mut list = column![
+        container(components::section_label(label)).padding(iced::Padding {
+            top: 0.0,
+            right: t::SPACE_3,
+            bottom: t::SPACE_2,
+            left: t::SPACE_3,
+        }),
+        components::hairline(),
+    ]
+    .width(Length::Fill);
+    for (index, row) in rows.into_iter().enumerate() {
+        if index > 0 {
+            list = list.push(components::hairline());
+        }
+        list = list.push(row);
+    }
+    list.into()
+}
+
 /// Whether this machine is accepting sessions, and who may sign in.
 ///
 /// Takes the display count rather than the whole [`Unattended`]: it is the only
-/// part of it this group can act on, and a group that took the rest would look
+/// part of it this section can act on, and one that took the rest would look
 /// like it might start using it.
-fn hosting_group<'a>(
+fn hosting_blocks<'a>(
     state: &'a State,
     hosting: Option<&'a Hosting>,
     displays: Option<usize>,
     now: Instant,
-) -> Element<'a, Message> {
-    let mut rows = Vec::new();
-    let mut after = column![].spacing(t::SPACE_3);
+) -> Vec<Element<'a, Message>> {
+    let mut blocks = Vec::new();
 
     match hosting {
         Some(hosting) => {
@@ -479,34 +787,39 @@ fn hosting_group<'a>(
                 1 => "1 machine is connected.".to_string(),
                 n => format!("{n} machines are connected."),
             };
-            rows.push(state_row(
-                t::LIME,
-                "Accepting sessions",
-                peers,
-                Some(hovered(
-                    SLOT_TOGGLE,
-                    components::small_button(Some(icon::DISCONNECT), "Stop hosting", Some(Message::ToggleHosting)),
-                )),
+            blocks.push(group(
+                "Status",
+                vec![state_row(
+                    t::LIME,
+                    "Accepting sessions",
+                    peers,
+                    Some(hovered(
+                        SLOT_TOGGLE,
+                        components::small_button(Some(icon::DISCONNECT), "Stop hosting", Some(Message::ToggleHosting)),
+                    )),
+                )],
             ));
-            rows.push(pad(column![
-                components::section_label("Connect code"),
-                components::code(
-                    hosting.code(),
-                    Some(hovered(SLOT_COPY, components::copy_button(state.copied, Message::CopyCode))),
-                ),
-                // Two different situations that look identical from the far
-                // end. Somebody staring at an empty device list needs to know
-                // whether this machine is findable at all before they go
-                // hunting for a reason on their own side.
-                components::note(if hosting.listed_on_lan() {
-                    "This is the public key itself, which is why it is long. Machines on this \
-                     network find this one by name; the code is for reaching it from anywhere else."
-                } else {
-                    "This is the public key itself, which is why it is long. This machine is not \
-                     listed on the local network, so paste the code into Connect on the other machine."
-                }),
-            ]
-            .spacing(t::SPACE_2)));
+            blocks.push(group(
+                "Connect code",
+                vec![pad(column![
+                    components::code(
+                        hosting.code(),
+                        Some(hovered(SLOT_COPY, components::copy_button(state.copied, Message::CopyCode))),
+                    ),
+                    // Two different situations that look identical from the far
+                    // end. Somebody staring at an empty device list needs to know
+                    // whether this machine is findable at all before they go
+                    // hunting for a reason on their own side.
+                    components::note(if hosting.listed_on_lan() {
+                        "This is the public key itself, which is why it is long. Machines on this \
+                         network find this one by name; the code is for reaching it from anywhere else."
+                    } else {
+                        "This is the public key itself, which is why it is long. This machine is not \
+                         listed on the local network, so paste the code into Connect on the other machine."
+                    }),
+                ]
+                .spacing(t::SPACE_2))],
+            ));
         }
         None => {
             let action = if state.is_starting() {
@@ -516,57 +829,59 @@ fn hosting_group<'a>(
             } else {
                 "Start hosting"
             };
-            rows.push(state_row(
-                t::ROUTE_OFFLINE,
-                "Not accepting sessions",
-                if state.accounts().is_empty() {
-                    "Create the account other machines will sign in with, then start."
-                } else {
-                    "Other machines can sign in once hosting starts."
-                },
-                Some(hovered(
-                    SLOT_TOGGLE,
-                    components::primary_button(
-                        Some(icon::BOLT),
-                        action,
-                        state.ready().then_some(Message::ToggleHosting),
-                    ),
-                )),
+            blocks.push(group(
+                "Status",
+                vec![state_row(
+                    t::ROUTE_OFFLINE,
+                    "Not accepting sessions",
+                    if state.accounts().is_empty() {
+                        "Create the account other machines will sign in with, then start."
+                    } else {
+                        "Other machines can sign in once hosting starts."
+                    },
+                    Some(hovered(
+                        SLOT_TOGGLE,
+                        components::primary_button(
+                            Some(icon::BOLT),
+                            action,
+                            state.ready().then_some(Message::ToggleHosting),
+                        ),
+                    )),
+                )],
             ));
-            rows.push(pad(new_account_form(state, now)));
 
             if let Some(error) = &state.error {
-                after = after.push(components::callout(icon::ALERT, error.as_str(), Tone::Danger));
+                blocks.push(components::callout(icon::ALERT, error.as_str(), Tone::Danger));
             }
             // The failure a headless machine hits, said before the password is
             // typed rather than after. Hosting refuses with the same words.
             if displays == Some(0) {
-                after = after.push(components::callout(
+                blocks.push(components::callout(
                     icon::ALERT,
                     crate::net::host::NO_DISPLAY,
                     Tone::Danger,
                 ));
             }
+
+            blocks.push(group("New account", vec![pad(new_account_form(state, now))]));
         }
     }
 
     if !state.accounts().is_empty() {
-        rows.push(saved_accounts(state));
+        blocks.push(saved_accounts(state));
     }
 
     // What hosting from a signed-in session cannot do. Stated once, plainly,
-    // and always — not behind a disclosure, because it changes whether this
+    // and always, not behind a disclosure, because it changes whether this
     // feature is fit for what someone is about to use it for.
-    after = after.push(components::callout(
+    blocks.push(components::callout(
         icon::ALERT,
         "Hosting runs inside your signed-in desktop session: it cannot show the lock screen or a \
          UAC prompt, and it exists only while somebody is signed in.",
         Tone::Warning,
     ));
 
-    column![components::section("Hosting", components::rows(rows)), after]
-        .spacing(t::SPACE_3)
-        .into()
+    blocks
 }
 
 /// The typed half of hosting: an account to add, and what it may do.
@@ -595,48 +910,51 @@ fn new_account_form<'a>(state: &'a State, now: Instant) -> Element<'a, Message> 
 /// unattended machine will accept at three in the morning, and this is the only
 /// place anyone would find that out.
 fn saved_accounts<'a>(state: &'a State) -> Element<'a, Message> {
-    let list = state.accounts().iter().fold(column![].spacing(t::SPACE_2), |list, account| {
-        list.push(
-            row![
-                icon::stroked(icon::LOCK, 13.0, t::SUBTLE_FOREGROUND),
-                text(account.username.clone())
-                    .size(t::TEXT_SM)
-                    .font(t::FONT_MONO)
-                    .wrapping(text::Wrapping::None)
-                    .style(theme::tinted(t::NEUTRAL_200))
-                    .width(Length::Fill),
-                components::pill(account.role.clone(), Tone::Outline),
-            ]
-            .spacing(t::SPACE_3)
-            .align_y(Alignment::Center),
-        )
-    });
-
-    pad(column![components::section_label("Accounts on this machine"), list].spacing(t::SPACE_3))
+    group(
+        "Accounts on this machine",
+        state
+            .accounts()
+            .iter()
+            .map(|account| {
+                pad(row![
+                    icon::stroked(icon::LOCK, 13.0, t::SUBTLE_FOREGROUND),
+                    text(account.username.clone())
+                        .size(t::TEXT_SM)
+                        .font(t::FONT_MONO)
+                        .wrapping(text::Wrapping::None)
+                        .style(theme::tinted(t::NEUTRAL_200))
+                        .width(Length::Fill),
+                    components::pill(account.role.clone(), Tone::Outline),
+                ]
+                .spacing(t::SPACE_3)
+                .align_y(Alignment::Center))
+            })
+            .collect(),
+    )
 }
 
 /// Displays on this machine, and how a headless one gets a real one.
 ///
 /// An elevated Pravera on a machine with no monitor installs the driver and
-/// adds the display by itself. The group also offers both actions explicitly,
+/// adds the display by itself. The section also offers both actions explicitly,
 /// for a desktop where a virtual display is wanted anyway. Pressed unelevated
 /// they report "run once as administrator" instead of a driver-store code.
-fn displays_group<'a>(state: &'a State, unattended: &Unattended) -> Element<'a, Message> {
+fn displays_blocks<'a>(state: &'a State, unattended: &Unattended) -> Vec<Element<'a, Message>> {
     let backend = unattended.capture_backend.clone();
     let backend_pill = || -> Element<'a, Message> { components::pill(backend.clone(), Tone::Outline) };
 
-    // `None` is "still counting", not headless — rendering it as 0 lied
+    // `None` is "still counting", not headless: rendering it as 0 lied
     // about probe failures.
     let Some(count) = unattended.displays else {
-        return components::section(
-            "Displays",
-            components::rows(vec![state_row(
+        return vec![group(
+            "Capture",
+            vec![state_row(
                 t::MUTED_FOREGROUND,
                 "Still checking…",
                 "Counting this machine's displays.",
                 Some(backend_pill()),
-            )]),
-        );
+            )],
+        )];
     };
 
     let headline = match count {
@@ -681,7 +999,7 @@ fn displays_group<'a>(state: &'a State, unattended: &Unattended) -> Element<'a, 
         (t::SUCCESS, "Hosting captures what is on them.")
     };
 
-    let mut rows = vec![state_row(tint, headline, detail, Some(backend_pill()))];
+    let mut blocks = vec![group("Capture", vec![state_row(tint, headline, detail, Some(backend_pill()))])];
 
     // Explicit controls, for a person at the machine. The automatic path only
     // ever adds the display to a machine with no monitor; on a desktop, a
@@ -703,33 +1021,36 @@ fn displays_group<'a>(state: &'a State, unattended: &Unattended) -> Element<'a, 
         ));
     }
     if any {
-        rows.push(setting(
+        blocks.push(group(
             "Virtual display",
-            if !elevated && !headless {
-                "A display that exists without a monitor. These need an elevated launch: right-click pravera.exe, then Run as administrator."
-            } else {
-                "A display that exists without a monitor, for hosting a machine that has none."
-            },
-            Some(controls.into()),
+            vec![setting(
+                "Add one",
+                if !elevated && !headless {
+                    "A display that exists without a monitor. These need an elevated launch: right-click pravera.exe, then Run as administrator."
+                } else {
+                    "A display that exists without a monitor, for hosting a machine that has none."
+                },
+                Some(controls.into()),
+            )],
         ));
     }
 
-    let mut group = column![components::section("Displays", components::rows(rows))].spacing(t::SPACE_3);
     if let Some(notice) = &state.virtual_notice {
-        group = group.push(
+        blocks.push(
             row![
                 components::callout(icon::ALERT, notice.as_str(), Tone::Warning),
                 components::small_button(None, "Dismiss", Some(Message::DismissVirtualNotice)),
             ]
             .spacing(t::SPACE_2)
-            .align_y(Alignment::Center),
+            .align_y(Alignment::Center)
+            .into(),
         );
     }
-    group.into()
+    blocks
 }
 
 /// Whether this machine comes back by itself.
-fn unattended_group<'a>(state: &'a State, unattended: &Unattended, now: Instant) -> Element<'a, Message> {
+fn unattended_blocks<'a>(state: &'a State, unattended: &Unattended, now: Instant) -> Vec<Element<'a, Message>> {
     let closing = if unattended.tray {
         "Closing the window while hosting leaves Pravera in the notification area, still \
          accepting sessions. Closing it while not hosting quits."
@@ -738,37 +1059,38 @@ fn unattended_group<'a>(state: &'a State, unattended: &Unattended, now: Instant)
          would be nothing left to reopen it or stop it with."
     };
 
-    let rows = vec![
-        boot_row(&unattended.service),
-        inset(components::switch_row(
-            "Start Pravera when I sign in",
-            "Registered under your own account, and visible in Task Manager's Startup tab.",
-            state.switch_travel(SLOT_AT_SIGN_IN, unattended.at_sign_in, now),
-            state.hover.amount(SLOT_AT_SIGN_IN, now),
-            Message::ToggleAtSignIn,
-            Message::Hover(SLOT_AT_SIGN_IN, true),
-            Message::Hover(SLOT_AT_SIGN_IN, false),
-        )),
-        inset(components::switch_row(
-            "Start hosting when Pravera starts",
-            "Accepts sessions as soon as it runs, using the accounts saved on this machine.",
-            state.switch_travel(SLOT_HOST_AT_LAUNCH, unattended.host_at_launch, now),
-            state.hover.amount(SLOT_HOST_AT_LAUNCH, now),
-            Message::ToggleHostAtLaunch,
-            Message::Hover(SLOT_HOST_AT_LAUNCH, true),
-            Message::Hover(SLOT_HOST_AT_LAUNCH, false),
-        )),
-    ];
-
-    let mut group = column![components::section("Unattended", components::rows(rows))].spacing(t::SPACE_3);
+    let mut blocks = vec![group(
+        "Startup",
+        vec![
+            boot_row(&unattended.service),
+            components::switch_row(
+                "Start Pravera when I sign in",
+                "Registered under your own account, and visible in Task Manager's Startup tab.",
+                state.switch_travel(SLOT_AT_SIGN_IN, unattended.at_sign_in, now),
+                state.hover.amount(SLOT_AT_SIGN_IN, now),
+                Message::ToggleAtSignIn,
+                Message::Hover(SLOT_AT_SIGN_IN, true),
+                Message::Hover(SLOT_AT_SIGN_IN, false),
+            ),
+            components::switch_row(
+                "Start hosting when Pravera starts",
+                "Accepts sessions as soon as it runs, using the accounts saved on this machine.",
+                state.switch_travel(SLOT_HOST_AT_LAUNCH, unattended.host_at_launch, now),
+                state.hover.amount(SLOT_HOST_AT_LAUNCH, now),
+                Message::ToggleHostAtLaunch,
+                Message::Hover(SLOT_HOST_AT_LAUNCH, true),
+                Message::Hover(SLOT_HOST_AT_LAUNCH, false),
+            ),
+        ],
+    )];
 
     // Worth saying once both switches are on, because that is the point at
-    // which somebody is relying on the machine coming back by itself — and
+    // which somebody is relying on the machine coming back by itself, and
     // sign-in is not boot. Suppressed when the service is registered, since
     // then the machine genuinely does come back on its own and the warning
     // would be describing a gap that is already closed.
     if unattended.at_sign_in && unattended.host_at_launch && unattended.service != Service::Installed {
-        group = group.push(components::callout(
+        blocks.push(components::callout(
             icon::ALERT,
             "This starts at sign-in, not at boot: a machine sitting at the sign-in screen after a \
              reboot is not running Pravera and cannot be reached. For a machine with no keyboard, \
@@ -778,7 +1100,7 @@ fn unattended_group<'a>(state: &'a State, unattended: &Unattended, now: Instant)
         ));
     }
     if unattended.host_at_launch && state.accounts().is_empty() {
-        group = group.push(components::callout(
+        blocks.push(components::callout(
             icon::ALERT,
             "There are no accounts on this machine yet, so hosting will refuse to start. Create \
              one under Hosting.",
@@ -786,11 +1108,12 @@ fn unattended_group<'a>(state: &'a State, unattended: &Unattended, now: Instant)
         ));
     }
 
-    group.push(components::note(closing)).into()
+    blocks.push(components::note(closing));
+    blocks
 }
 
 /// Which version this is, and whether a newer one is on its way.
-fn updates_group<'a>(state: &'a State, updates: &Updates, now: Instant) -> Element<'a, Message> {
+fn updates_blocks<'a>(state: &'a State, updates: &Updates, now: Instant) -> Vec<Element<'a, Message>> {
     let tint = if updates.pending {
         t::LIME
     } else if updates.enabled {
@@ -821,7 +1144,7 @@ fn updates_group<'a>(state: &'a State, updates: &Updates, now: Instant) -> Eleme
 
     let mut rows = vec![state_row(tint, updates.headline.clone(), updates.detail.clone(), button)];
     if updates.enabled {
-        rows.push(inset(components::switch_row(
+        rows.push(components::switch_row(
             "Update by itself",
             "A downloaded update is applied when no session is open, nobody is connected and the \
              window is closed. Otherwise it waits for the button above.",
@@ -830,13 +1153,13 @@ fn updates_group<'a>(state: &'a State, updates: &Updates, now: Instant) -> Eleme
             Message::ToggleAutoUpdate,
             Message::Hover(SLOT_AUTO_UPDATE, true),
             Message::Hover(SLOT_AUTO_UPDATE, false),
-        )));
+        ));
     }
-    components::section("Updates", components::rows(rows))
+    vec![group("Release", rows)]
 }
 
 /// Who this machine is, and what it will encode with.
-fn machine_group<'a>(state: &'a State, device_id: Option<DeviceId>) -> Element<'a, Message> {
+fn machine_blocks<'a>(state: &'a State, device_id: Option<DeviceId>) -> Vec<Element<'a, Message>> {
     let id: Element<'a, Message> = match device_id {
         Some(id) => text(id.to_string())
             .size(t::TEXT_SM)
@@ -862,31 +1185,35 @@ fn machine_group<'a>(state: &'a State, device_id: Option<DeviceId>) -> Element<'
         Some(false) => components::pill("Software", Tone::Warning),
     };
 
-    let rows = vec![
-        setting(
-            "Device ID",
-            "A fingerprint. Short enough to read aloud, and one-way, so it cannot be dialled.",
-            Some(id),
+    vec![
+        group(
+            "Identity",
+            vec![setting(
+                "Device ID",
+                "A fingerprint. Short enough to read aloud, and one-way, so it cannot be dialled.",
+                Some(id),
+            )],
         ),
-        setting(
-            "Video encoder",
-            match state.hardware {
-                Some(false) => "No hardware encoder was found, so sessions hosted here are encoded on the CPU. That is several times slower, and it is what limits the frame rate.",
-                _ => "Sessions hosted here are encoded on this machine, so its encoder sets the frame rate.",
-            },
-            Some(encoder),
+        group(
+            "Encoding",
+            vec![setting(
+                "Video encoder",
+                match state.hardware {
+                    Some(false) => "No hardware encoder was found, so sessions hosted here are encoded on the CPU. That is several times slower, and it is what limits the frame rate.",
+                    _ => "Sessions hosted here are encoded on this machine, so its encoder sets the frame rate.",
+                },
+                Some(encoder),
+            )],
         ),
-    ];
-
-    components::section("This machine", components::rows(rows))
+    ]
 }
 
 /// Whether this machine comes back at boot, stated rather than implied.
 ///
 /// A fact, not a control, so it is drawn as one: the same dot-and-sentence the
-/// hosting group uses for a state nobody sets directly. Registering the
+/// hosting section uses for a state nobody sets directly. Registering the
 /// service happens by itself when Pravera runs elevated, and the only thing
-/// anybody can do about it from here is run Pravera as administrator once —
+/// anybody can do about it from here is run Pravera as administrator once,
 /// which is what the second line says when that is the answer.
 fn boot_row<'a>(service: &Service) -> Element<'a, Message> {
     let (tint, headline, detail) = match service {
@@ -894,7 +1221,7 @@ fn boot_row<'a>(service: &Service) -> Element<'a, Message> {
             t::SUCCESS,
             "Starts at boot",
             "Windows starts Pravera before anybody signs in, and again after every sign-out. \
-             Moving this file is fine — it repoints the service at wherever it now is."
+             Moving this file is fine; it repoints the service at wherever it now is."
                 .to_string(),
         ),
         Service::NeedsElevation => (
@@ -924,24 +1251,28 @@ fn boot_row<'a>(service: &Service) -> Element<'a, Message> {
 /// The list and the descriptions both come from the host's own roles, so a
 /// role this screen offers is always one `pravera-auth` will accept, and no
 /// description can drift out of step with the permissions it describes.
+///
+/// The tiles are controls, not decoration, so they answer the pointer and the
+/// choice: the lift under the pointer and the hold on the chosen one are both
+/// animated, and the hold hands over from the old choice to the new.
 fn roles<'a>(state: &'a State, now: Instant) -> Element<'a, Message> {
     let available = crate::net::host::roles();
 
     let mut bar = row![].spacing(t::SPACE_2);
     for (index, role) in available.iter().take(ROLE_SLOTS).enumerate() {
         let name = role.name.clone();
-        let chosen = state.role() == name;
+        let chosen = state.role_amount(&name, now);
         let hover = state.hover.amount(index, now);
 
-        let mut title = row![text(name.clone())
-            .size(t::TEXT_SM)
-            .font(if chosen { t::FONT_UI_STRONG } else { t::FONT_UI_MEDIUM })
-            .wrapping(text::Wrapping::None)
-            .width(Length::Fill)]
+        let title = row![
+            text(name.clone())
+                .size(t::TEXT_SM)
+                .font(t::FONT_UI_STRONG)
+                .wrapping(text::Wrapping::None)
+                .width(Length::Fill),
+            icon::stroked(icon::CHECK, 12.0, theme::faded(t::FOREGROUND, chosen)),
+        ]
         .align_y(Alignment::Center);
-        if chosen {
-            title = title.push(icon::stroked(icon::CHECK, 12.0, t::FOREGROUND));
-        }
 
         let tile = button(
             column![
@@ -953,20 +1284,18 @@ fn roles<'a>(state: &'a State, now: Instant) -> Element<'a, Message> {
         .width(Length::Fill)
         .padding([t::SPACE_2 + 2.0, t::SPACE_3])
         .style(move |_, status| button::Style {
-            background: Some(Background::Color(if chosen {
-                t::NEUTRAL_800
-            } else if status == button::Status::Pressed {
-                t::NEUTRAL_825
+            background: Some(Background::Color(if status == button::Status::Pressed {
+                theme::blend(t::NEUTRAL_825, t::NEUTRAL_800, chosen)
             } else {
-                theme::blend(t::BACKGROUND, t::NEUTRAL_850, hover)
+                theme::blend(theme::blend(t::BACKGROUND, t::NEUTRAL_850, hover), t::NEUTRAL_800, chosen)
             })),
-            text_color: if chosen { t::FOREGROUND } else { t::NEUTRAL_300 },
+            text_color: theme::blend(t::NEUTRAL_300, t::FOREGROUND, chosen),
             border: Border {
-                color: if chosen {
-                    t::BEVEL_HOVER.top
-                } else {
-                    theme::blend(t::NEUTRAL_825, t::BEVEL_RAISED.sides, hover)
-                },
+                color: theme::blend(
+                    theme::blend(t::NEUTRAL_825, t::BEVEL_RAISED.sides, hover),
+                    t::BEVEL_HOVER.top,
+                    chosen,
+                ),
                 width: 1.0,
                 radius: t::RADIUS.into(),
             },
@@ -1006,18 +1335,13 @@ fn describe(role: &pravera_auth::Role) -> String {
 
 // -------------------------------------------------------------------- pieces
 
-/// The inset every row in a group shares.
+/// The inset every row in a group shares: the same as the label over it and
+/// as a switch row's own, so words line up down the whole section.
 fn pad<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(content)
-        .padding([t::SPACE_3 + 2.0, t::SPACE_4])
+        .padding([t::SPACE_3, t::SPACE_3])
         .width(Length::Fill)
         .into()
-}
-
-/// A row that brings its own padding, set a little in from the group's edge
-/// so its hover lands inside the tile rather than on it.
-fn inset<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
-    container(content).padding(t::SPACE_1).width(Length::Fill).into()
 }
 
 /// One setting: what it is and what it means on the left, whatever answers
@@ -1116,6 +1440,54 @@ mod tests {
             password: password.to_string(),
             ..State::default()
         }
+    }
+
+    #[test]
+    fn choosing_a_section_shows_it_and_hands_the_highlight_over() {
+        let now = Instant::now();
+        let mut state = State::default();
+        assert_eq!(state.section(), Section::Hosting);
+
+        state.select(Section::Updates, now);
+        assert_eq!(state.section(), Section::Updates);
+        assert!(state.is_animating(now));
+        // Halfway, the section left is fading out and the one chosen in.
+        let mid = now + motion::STANDARD / 2;
+        let left = state.nav_active[Section::Hosting.index()].value(mid);
+        let chosen = state.nav_active[Section::Updates.index()].value(mid);
+        assert!(left > 0.0 && left < 1.0, "{left}");
+        assert!(chosen > 0.0 && chosen < 1.0, "{chosen}");
+        // When it has landed only the chosen one is held.
+        let done = now + motion::STANDARD + std::time::Duration::from_millis(1);
+        assert_eq!(state.nav_active[Section::Hosting.index()].value(done), 0.0);
+        assert_eq!(state.nav_active[Section::Updates.index()].value(done), 1.0);
+    }
+
+    #[test]
+    fn choosing_the_section_already_shown_starts_nothing() {
+        let now = Instant::now();
+        let mut state = State::default();
+        // The page's own entrance is over: nothing else should be moving.
+        let later = now + motion::STANDARD * 10;
+        state.select(Section::Hosting, later);
+        assert!(!state.is_animating(later + motion::ENTRANCE * 4));
+    }
+
+    #[test]
+    fn the_role_just_chosen_rises_as_the_one_it_replaced_falls() {
+        let now = Instant::now();
+        let mut state = State::default();
+        state.role = "operator".into();
+        let _ = update(&mut state, Message::Role("admin".into()), now);
+        let mid = now + motion::STANDARD / 2;
+        let rising = state.role_amount("admin", mid);
+        let falling = state.role_amount("operator", mid);
+        assert!(rising > 0.0 && rising < 1.0, "{rising}");
+        assert!((rising + falling - 1.0).abs() < 1e-5, "{rising} + {falling}");
+        assert_eq!(state.role_amount("viewer", mid), 0.0);
+        let done = now + motion::STANDARD + std::time::Duration::from_millis(1);
+        assert_eq!(state.role_amount("admin", done), 1.0);
+        assert_eq!(state.role_amount("operator", done), 0.0);
     }
 
     /// A machine that already knows somebody.

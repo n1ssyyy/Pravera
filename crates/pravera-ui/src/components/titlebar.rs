@@ -298,8 +298,11 @@ fn tab_view<'a>(index: usize, tab: &TabInfo<'a>, active: bool, hover: f32) -> El
     .spacing(t::SPACE_1_5)
     .align_y(Alignment::Center);
 
+    // A button lays its content at the top of its padding box, so a fixed
+    // height with zero vertical padding left the label riding high; the
+    // container centres it on the bar's line with the mark and the toggle.
     mouse_area(
-        button(label)
+        button(container(label).center_y(Length::Fill))
             .height(Length::Fixed(t::ROW_HEIGHT))
             .padding(iced::Padding {
                 top: 0.0,

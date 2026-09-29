@@ -48,11 +48,11 @@ impl Health {
     }
 }
 
-/// One card at the foot of the Devices page: a heading band, then the four
-/// sources side by side, split by hairlines — DigiClip's health strip. A
-/// strip rather than a list, so it costs the device list as little height as
-/// it can.
-pub fn view<'a, Message: 'a>(discovered: &Discovered) -> Element<'a, Message> {
+/// The foot of the Devices sheet: a label with how many sources are live, then
+/// the four sources side by side, split by hairlines. A strip rather than a
+/// list, so it costs the device list as little height as it can. It is a
+/// region of the page, not a card of its own.
+pub fn footer<'a, Message: 'a>(discovered: &Discovered) -> Element<'a, Message> {
     let sources = [
         (icon::CABLE, "Direct link", direct_link_health(discovered)),
         (icon::WIRELESS, "Local network", lan_health(discovered)),
@@ -62,7 +62,9 @@ pub fn view<'a, Message: 'a>(discovered: &Discovered) -> Element<'a, Message> {
 
     let live = sources.iter().filter(|(_, _, health)| health.is_live()).count();
 
-    let mut strip = row![].height(Length::Fixed(CELL_HEIGHT));
+    let mut strip = row![]
+        .height(Length::Fixed(CELL_HEIGHT))
+        .align_y(Alignment::Center);
     for (index, (glyph, name, health)) in sources.into_iter().enumerate() {
         if index > 0 {
             strip = strip.push(components::vrule(Length::Fill));
@@ -70,7 +72,7 @@ pub fn view<'a, Message: 'a>(discovered: &Discovered) -> Element<'a, Message> {
         strip = strip.push(source_cell(glyph, name, health));
     }
 
-    components::panel(column![
+    column![
         container(
             row![
                 components::section_label("Discovery"),
@@ -82,19 +84,26 @@ pub fn view<'a, Message: 'a>(discovered: &Discovered) -> Element<'a, Message> {
             ]
             .align_y(Alignment::Center),
         )
-        .padding([0.0, t::SPACE_4])
-        .height(Length::Fixed(t::ROW_HEIGHT + 4.0))
-        .center_y(Length::Fixed(t::ROW_HEIGHT + 4.0)),
-        components::hairline(),
-        strip,
-    ])
-    .padding(0)
+        .padding(iced::Padding {
+            top: t::SPACE_3,
+            right: t::SPACE_6,
+            bottom: 0.0,
+            left: t::SPACE_6,
+        }),
+        // The cells carry a gutter of their own, so the strip starts that much
+        // short of the page's margin and the first cell's words line up with
+        // the label above them.
+        container(strip).padding([0.0, t::SPACE_6 - CELL_GUTTER]),
+    ]
     .width(Length::Fill)
     .into()
 }
 
 /// The height of one source's cell: its name over its state.
-const CELL_HEIGHT: f32 = 60.0;
+const CELL_HEIGHT: f32 = 64.0;
+
+/// The room inside a cell, either side of its words.
+const CELL_GUTTER: f32 = t::SPACE_4;
 
 fn source_cell<'a, Message: 'a>(
     glyph: &'static str,
@@ -103,9 +112,12 @@ fn source_cell<'a, Message: 'a>(
 ) -> Element<'a, Message> {
     let live = health.is_live();
 
+    // A long state wraps under its dot rather than being cut off: this strip
+    // exists to say why a machine is missing, and half a sentence does not.
     container(
         row![
-            icon::stroked(glyph, t::ICON, if live { t::FOREGROUND } else { t::SUBTLE_FOREGROUND }),
+            container(icon::stroked(glyph, t::ICON, if live { t::FOREGROUND } else { t::SUBTLE_FOREGROUND }))
+                .padding([1.0, 0.0]),
             column![
                 text(name)
                     .size(t::TEXT_SM)
@@ -113,24 +125,29 @@ fn source_cell<'a, Message: 'a>(
                     .wrapping(text::Wrapping::None)
                     .style(theme::tinted(if live { t::FOREGROUND } else { t::NEUTRAL_300 })),
                 row![
-                    components::dot(health.tint(), 6.0),
+                    container(components::dot(health.tint(), 6.0)).padding([4.0, 0.0]),
                     text(health.detail().to_string())
                         .size(t::TEXT_XS)
-                        .wrapping(text::Wrapping::None)
+                        .width(Length::Fill)
                         .style(theme::muted),
                 ]
                 .spacing(t::SPACE_1_5)
-                .align_y(Alignment::Center),
+                .align_y(Alignment::Start),
             ]
-            .spacing(3.0),
+            .spacing(3.0)
+            .width(Length::Fill),
         ]
         .spacing(t::SPACE_3)
-        .align_y(Alignment::Center),
+        .align_y(Alignment::Start),
     )
-    .padding([0.0, t::SPACE_4])
+    .padding(iced::Padding {
+        top: t::SPACE_3,
+        right: CELL_GUTTER,
+        bottom: 0.0,
+        left: CELL_GUTTER,
+    })
     .width(Length::Fill)
     .height(Length::Fill)
-    .center_y(Length::Fill)
     .clip(true)
     .into()
 }

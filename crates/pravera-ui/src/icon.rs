@@ -205,6 +205,9 @@ pub const TERMINAL: &str = icon16!(
     r#"<rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5"/><path d="M4.25 6 6.5 8l-2.25 2M8.25 10.25h3.5"/>"#
 );
 
+/// Three dots. More to do with the thing beside it.
+pub const MORE: &str = icon16!(r#"<path d="M3.5 8h.01M8 8h.01M12.5 8h.01"/>"#);
+
 /// A broken link. Forget a machine: the record goes, discovery can find it again.
 pub const FORGET: &str = icon16!(
     r#"<path d="M6.5 9.5 9.5 6.5"/><path d="M4.75 7.25 3.4 8.6a2.75 2.75 0 0 0 3.9 3.9l1.35-1.35"/><path d="M11.25 8.75l1.35-1.35a2.75 2.75 0 0 0-3.9-3.9L7.35 4.85"/>"#

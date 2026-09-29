@@ -63,7 +63,7 @@ pub(crate) mod conpty {
     use std::sync::Arc;
 
     use windows::core::{PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows::Win32::System::Console::{
         ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
     };
@@ -90,11 +90,18 @@ pub(crate) mod conpty {
     struct PipeEnd(HANDLE);
 
     impl PipeEnd {
-        fn into_reader(self) -> std::fs::File {
-            unsafe { std::fs::File::from_raw_handle(self.0 .0 as _) }
-        }
-        fn into_writer(self) -> std::fs::File {
-            unsafe { std::fs::File::from_raw_handle(self.0 .0 as _) }
+        /// Hand the handle to a `File`, which closes it from then on.
+        ///
+        /// The `forget` is the whole point. Without it this end's own `Drop`
+        /// ran as the method returned and closed the handle the `File` had
+        /// just been given, so the reader failed on its first read, the
+        /// terminal reported the shell as killed (-1) while it was still
+        /// starting, and the `File` later closed a handle value Windows may
+        /// already have given to something else.
+        fn into_file(self) -> std::fs::File {
+            let raw = self.0 .0;
+            std::mem::forget(self);
+            unsafe { std::fs::File::from_raw_handle(raw as _) }
         }
     }
 
@@ -233,10 +240,9 @@ pub(crate) mod conpty {
 
         Ok((
             spawn_result.expect("checked above"),
-            // From here these are plain files, and the pipe ends must not run
-            // their own `CloseHandle` on the way out.
-            in_write.into_writer(),
-            out_read.into_reader(),
+            // From here these are plain files, each the handle's one owner.
+            in_write.into_file(),
+            out_read.into_file(),
         ))
     }
 
@@ -286,7 +292,12 @@ pub(crate) mod conpty {
         // under a supervisor — hands those handles to the shell, which then
         // writes its prompt into the host's log instead of the console, and
         // the terminal on the other end stays blank.
+        // Invalid rather than null, as WezTerm's pty does: a null handle is
+        // a value some programs try to use, an invalid one is plainly absent.
         startup.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = INVALID_HANDLE_VALUE;
+        startup.StartupInfo.hStdOutput = INVALID_HANDLE_VALUE;
+        startup.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
         let mut info = PROCESS_INFORMATION::default();
 
         // PowerShell first: it is the shell Windows steers people towards, and
@@ -305,9 +316,10 @@ pub(crate) mod conpty {
             &startup as *const STARTUPINFOEXW as *const _,
             &mut info,
         );
-        if launched.is_err() {
+        if let Err(error) = launched {
+            warn!(%error, "PowerShell could not be started; trying cmd");
             command = to_wide("cmd.exe");
-            if CreateProcessW(
+            if let Err(error) = CreateProcessW(
                 PCWSTR::null(),
                 Some(PWSTR(command.as_mut_ptr())),
                 None,
@@ -318,11 +330,9 @@ pub(crate) mod conpty {
                 PCWSTR::null(),
                 &startup as *const STARTUPINFOEXW as *const _,
                 &mut info,
-            )
-            .is_err()
-            {
+            ) {
                 DeleteProcThreadAttributeList(list);
-                return Err(std::io::Error::last_os_error());
+                return Err(std::io::Error::from_raw_os_error(error.code().0));
             }
         }
         DeleteProcThreadAttributeList(list);
@@ -386,7 +396,10 @@ pub(crate) mod conpty {
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Err(error) => {
+                        warn!(%error, "reading the shell's console failed");
+                        break;
+                    }
                 }
             }
         });
@@ -403,7 +416,8 @@ pub(crate) mod conpty {
         let (incoming_tx, mut incoming_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         std::thread::spawn(move || {
             while let Some(bytes) = incoming_rx.blocking_recv() {
-                if shell_input.write_all(&bytes).is_err() {
+                if let Err(error) = shell_input.write_all(&bytes) {
+                    warn!(%error, "writing to the shell's console failed");
                     break;
                 }
                 let _ = shell_input.flush();
@@ -492,12 +506,14 @@ pub(crate) mod conpty {
         if let Ok(mut slot) = shell.lock() {
             if let Some(shell) = slot.take() {
                 let mut code = 0u32;
-                unsafe {
-                    let _ = GetExitCodeProcess(shell.process, &mut code);
+                if let Err(error) = unsafe { GetExitCodeProcess(shell.process, &mut code) } {
+                    warn!(%error, "the shell's exit code could not be read");
+                    return TerminalOut::KILLED;
                 }
                 // STILL_ACTIVE would mean the process outlived its pipe, which
                 // does not happen through normal exits; report a teardown.
                 if code == 259 {
+                    warn!("the console's output ended while the shell was still running");
                     return TerminalOut::KILLED;
                 }
                 return code as i32;

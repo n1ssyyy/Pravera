@@ -33,37 +33,43 @@ surface wants a colour for emphasis, the answer is weight or size, not hue.
 
 ## Typography
 
-Two faces, with a deliberate split that comes from the subject matter.
+One face: **JetBrains Mono**, embedded in the binary (`FONT_BYTES`) so the interface looks the same
+on a machine that has never heard of it. It is the default font, so a widget that forgets to set one
+still lands on it.
 
-- **UI sans** (`FONT_UI`, `FONT_UI_STRONG`) for prose, names, and anything a human wrote.
-- **Mono** (`FONT_MONO`, `FONT_MONO_STRONG`) for everything the machine knows: addresses, device IDs, interface names,
-  figures, latencies, and every uppercase eyebrow label.
+The tokens say what a string *is* rather than which file it comes from:
 
-The second half of that rule is the point. This is a product about network paths, and its native
-vernacular is fixed-width technical strings. Promoting mono from "the font for code" to "the voice
-of the machine" gives the interface a character that costs no extra font loading and could not be
-lifted onto a different product.
+- `FONT_UI`, `FONT_UI_MEDIUM`, `FONT_UI_STRONG` (Regular 400, Medium 500, Semibold 600) for prose,
+  names, labels and anything a human wrote.
+- `FONT_MONO`, `FONT_MONO_STRONG` for everything the machine knows: addresses, device IDs,
+  interface names, figures, latencies, and every uppercase eyebrow label. They resolve to the same
+  face as the UI weights; they are separate tokens so a call site still declares its intent, and so
+  the machine's voice can be split off again without touching the screens.
 
-Eyebrow labels are uppercase mono, letterspaced with hair spaces (iced has no tracking property),
-at `TEXT_2XS`. They are structural: they name a region, and they never restate a heading.
+Making the whole interface mono is the point, not a compromise. This is a product about network
+paths, and its native vernacular is fixed-width technical strings. When the chrome speaks in the
+machine's own voice, an address, a figure and a page title sit on one grid, and nothing about the
+type could be lifted onto a different product. Hierarchy comes from size and weight, never from
+switching families.
 
-Scale: 11 / 12 / 14 / 16 / 20 / 24 / 32. Steps are at least 1.2x apart.
+Eyebrow labels are uppercase (`tokens::tracked`, which only upper-cases: a monospaced face already
+sets capitals evenly), at `TEXT_2XS`. They are structural: they name a region, and they never
+restate a heading.
 
-### Only Normal, Semibold and Bold
+Scale: 10 / 11 / 13 / 14 / 16 / 20 / 26. Page titles are `TEXT_LG` in the header and section titles
+inside a page are the same; `TEXT_XL` and above are for the rare hero.
 
-`Weight::Medium` is banned, and the reason is a trap worth writing down.
+### How weights are registered
 
-Windows ships Segoe UI in Light, Semilight, Regular, Semibold, Bold and Black. There is no Medium.
-When cosmic-text cannot satisfy a weight request it falls back to a different **family**, not to a
-neighbouring weight of the same one, so asking for a medium-weight sans on Windows silently returns
-a **serif**. Nothing logs a warning; labels just quietly render in the wrong typeface. It was in the
-build for an hour before a magnified screenshot caught it.
-
-Only weights every platform reliably carries are used, and
-`tokens::tests::no_token_asks_for_a_weight_that_may_not_exist` fails the build if that slips.
-
-Bundling Inter and selecting it by name would remove the platform dependency entirely and give
-Windows and Linux identical typography. That is the right permanent fix and is not done yet.
+The font file is variable, so it registers once, at its default weight of 400. cosmic-text only
+takes a requested family's own face when the registered weight is exactly the one asked for;
+otherwise it tries its fallback list first, and on Windows that list starts with Segoe UI, which
+has no Medium. Nothing logs a warning: labels just quietly render in a different family (once, a
+serif). So `tokens::font_at` registers the same bytes again with the OS/2 weight class rewritten to
+500 and 600, which gives each weight an exact match in its own family while the glyphs still come
+from the `wght` axis at render time. `Weight::Bold` is not registered and must not be requested;
+`tokens::tests::every_weight_the_interface_uses_has_a_face_that_claims_it` fails the build if a
+token asks for a weight with no face behind it.
 
 ## Elevation
 
@@ -75,26 +81,57 @@ lighting, and there is no light source in this interface.
 
 ## Motion
 
-Every animation is one of three tiers. Keeping the set this small is what makes the app feel like
-one object rather than a pile of separately-tuned widgets.
+`crates/pravera-ui/src/motion.rs` is the source of truth for every number below; this section says
+what they are for. Keeping the set small is what makes the app feel like one object rather than a
+pile of separately-tuned widgets.
 
-| Tier | Duration | Easing | Used for |
+| Token | Duration | Easing | Used for |
 |---|---|---|---|
-| micro | 120ms | `EaseOutQuart` | hover, press, focus |
-| standard | 220ms | `EaseOutQuint` | state change, selection, badge |
-| entrance | 340ms | `EaseOutExpo` | screen, list item, banner |
+| `MICRO` | 120ms | ease-out-quart | hover, press, focus, a page's contents leaving, a dialog or menu leaving |
+| `STANDARD` | 200ms | ease-out-cubic | a value moving between two resting states: switches, selection, the rail's highlight, a segmented control's thumb, a nav entry |
+| `ENTRANCE` | 320ms | ease-out-quint | anything arriving: a page's header and blocks, a dialog and its scrim |
+| `MENU_IN` | 220ms | ease-out-quint | a context menu arriving (a glance, so shorter than a dialog) |
 
-All three decelerate. Nothing bounces, nothing overshoots, nothing eases in: an interface element
-responding to a pointer should start immediately and settle, because the user's input already
-supplied the acceleration.
+Leaving uses the exit curve, ease-in-cubic, and is never longer than `MICRO`: nobody is waiting to
+watch something go. Arrivals and changes decelerate, so a thing responding to input starts at once
+and settles. Nothing bounces and nothing overshoots.
 
-List entrances stagger by 22ms per item, clamped at 220ms total, so a long list still reads as one
-arrival rather than a queue.
+**Page changes.** The sheet is chrome, so it never moves or fades; only what is on it changes. The
+old contents fade out in place over `MICRO` with no travel. The new header and body then rise 6px
+(`PAGE_RISE`) and fade in over `ENTRANCE`, the header first and each block of the body 22ms after
+the one above it (`STAGGER_STEP`), the rows of a list on the same beat. The stagger is capped at
+220ms (`STAGGER_MAX`), so a long list is still one arrival and not a queue.
+
+**The rail** has one highlight that slides to the active entry over `STANDARD`, at a steady pace
+however far the entry is. Entries grow into pills under the pointer as before.
+
+**Segmented controls** have one tile that slides under the chosen cell over `STANDARD`; the label
+of each cell is lit by how much of the tile is under it.
+
+**Dialogs** arrive over `ENTRANCE` from 97% scale and transparent, with the scrim fading in beside
+them, and leave over `MICRO` the same way back.
+
+**Buttons** ease between their resting and hovered looks over `MICRO` (`widget::glide`), which
+keeps its own hover in the widget tree. A press answers at once.
 
 iced 0.14 renders reactively, so animation requires holding a `window::frames()` subscription while
 something is in flight. Each screen owns its animations and answers `is_animating(now)`; the
-application subscribes only while some answer is yes. Nothing animates by accident and nothing
-spins the GPU at rest.
+application subscribes only while some answer is yes. A button's own hover asks for redraws only
+for the 120ms it takes. Nothing animates by accident and nothing spins the GPU at rest.
+
+## The page
+
+Every page is one sheet: a single bevelled panel (`RADIUS_LG`, `CARD`, `BEVEL_CARD`) filling the
+window to the right of the rail, which sits on the window floor. The header is the top region of
+the sheet, 56px tall, with the title at `TEXT_LG` in `FONT_UI_STRONG`, what the page is showing at a
+glance beside it and the page's actions on the right. A hairline splits it from the body, and the
+body scrolls inside the sheet. The sheet and that hairline belong to the shell, not to the page:
+changing page changes what is on the sheet and never the sheet.
+
+Anything else a page needs is another region of the same sheet, split by a hairline: a second pane
+is left, vrule, right (`page_split`); a status strip or a ledger is a footer under its own hairline
+(`page_footed`). A page never sets a card inside its sheet, so the header, the panes and the footer
+are separated by rules and space, not by boxes.
 
 ## Icons
 

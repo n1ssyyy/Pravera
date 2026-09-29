@@ -178,6 +178,20 @@ impl Updater {
         matches!(self.phase, Phase::Downloading { .. } | Phase::Ready { .. })
     }
 
+    /// The state in a few words, for the Settings list.
+    pub fn brief(&self) -> String {
+        match &self.phase {
+            _ if !self.enabled => "Off".into(),
+            Phase::Idle => "Not checked".into(),
+            Phase::Checking => "Checking".into(),
+            Phase::Current => "Up to date".into(),
+            Phase::Failed(_) => "Check failed".into(),
+            Phase::Downloading { release, .. } => format!("{} on its way", release.version),
+            Phase::Ready { release, .. } => format!("{} ready", release.version),
+            Phase::Applying => "Restarting".into(),
+        }
+    }
+
     /// The Settings row: a headline and a line under it.
     pub fn describe(&self) -> (String, String) {
         let current = format!("Pravera {}", crate::install::VERSION);
@@ -192,7 +206,7 @@ impl Updater {
             Phase::Failed(reason) => (current, format!("The last check did not finish. {reason}")),
             Phase::Downloading { release, done, total } => {
                 let share = if *total > 0 {
-                    format!(" — {}%", (done * 100 / total).min(100))
+                    format!(", {}%", (done * 100 / total).min(100))
                 } else {
                     String::new()
                 };
@@ -256,6 +270,25 @@ mod tests {
         assert!(!updater.pending());
         assert!(!updater.due(now + Duration::from_secs(60)));
         assert!(updater.due(now + CHECK_EVERY));
+    }
+
+    #[test]
+    fn the_state_in_a_few_words_follows_the_phase() {
+        let now = Instant::now();
+        assert_eq!(Updater::new(now, false).brief(), "Off");
+        let mut updater = Updater::new(now, true);
+        assert_eq!(updater.brief(), "Not checked");
+        updater.checking();
+        assert_eq!(updater.brief(), "Checking");
+        updater.checked(Ok(release("0.0.1")), now);
+        assert_eq!(updater.brief(), "Up to date");
+        updater.checked(Err("offline".into()), now);
+        assert_eq!(updater.brief(), "Check failed");
+        updater.checked(Ok(release("999.0.0")), now);
+        updater.progress(5, 10);
+        assert!(updater.brief().ends_with("on its way"));
+        updater.downloaded(Ok(PathBuf::from("x")), now);
+        assert_eq!(updater.brief(), "999.0.0 ready");
     }
 
     #[test]

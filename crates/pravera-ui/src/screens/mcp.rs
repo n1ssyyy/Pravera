@@ -21,7 +21,7 @@ use std::time::Instant;
 use iced::widget::{column, container, row, text};
 use iced::{Alignment, Element, Length};
 
-use crate::components::{self, Tone};
+use crate::components::{self, stat, Tone};
 use crate::icon;
 use crate::motion::{self, HoverTracker};
 use crate::net::mcp::Mcp;
@@ -189,19 +189,11 @@ pub fn view<'a>(state: &'a State, now: Instant) -> Element<'a, Message> {
         .style(theme::muted),
     );
 
-    components::page(
-        motion::rise(header, motion::cascade(since, now, 0)),
-        row![
-            motion::rise(
-                container(components::body(connection(state, now)))
-                    .width(Length::Fixed(CONNECTION_WIDTH))
-                    .height(Length::Fill),
-                motion::cascade(since, now, 1),
-            ),
-            motion::rise(components::body(toolbox(state)), motion::cascade(since, now, 2)),
-        ]
-        .spacing(t::GAP)
-        .height(Length::Fill),
+    components::page_split(
+        motion::settle(header, motion::cascade(since, now, 0)),
+        motion::settle(components::body(connection(state, now)), motion::cascade(since, now, 1)),
+        CONNECTION_WIDTH,
+        motion::settle(components::body(toolbox(state)), motion::cascade(since, now, 2)),
     )
 }
 
@@ -226,10 +218,8 @@ fn connection<'a>(state: &'a State, now: Instant) -> Element<'a, Message> {
         )
     };
 
-    // The switch sits in a tile of its own, the way every setting does, so
-    // its words line up with the tile's edge rather than floating 12px in
-    // from everything else in the column.
-    let switch = components::rows(vec![container(components::switch_row(
+    // A row that is the switch. It draws nothing until the pointer is on it.
+    let switch = components::switch_row(
         "Let AI agents control this machine",
         "Opens the tool bus on 127.0.0.1. Nothing on the network can reach it.",
         state.switch_travel(SLOT_TOGGLE, running, now),
@@ -237,9 +227,7 @@ fn connection<'a>(state: &'a State, now: Instant) -> Element<'a, Message> {
         Message::Toggle(!running),
         Message::Hover(SLOT_TOGGLE, true),
         Message::Hover(SLOT_TOGGLE, false),
-    ))
-    .padding(t::SPACE_1)
-    .into()]);
+    );
 
     let mut body = column![hero, switch]
     .spacing(t::SPACE_4)
@@ -320,32 +308,46 @@ fn toolbox<'a>(state: &'a State) -> Element<'a, Message> {
     let sensitive = tools.iter().filter(|tool| tool.sensitive).count();
     let groups = grouped(tools);
 
-    let mut body = column![components::stats(vec![
-        ("Tools", total.to_string(), t::FOREGROUND),
-        (
-            "Sensitive",
-            sensitive.to_string(),
-            if sensitive > 0 { t::DESTRUCTIVE_TEXT } else { t::FOREGROUND },
-        ),
-        ("Groups", groups.len().to_string(), t::FOREGROUND),
-    ])]
-    .spacing(t::SPACE_6)
-    .width(Length::Fill);
+    // One line of figures, not a strip of boxes: what is on the bus, and how
+    // much of it needs care.
+    let mut figures = row![stat::figure(total, "tools", t::FOREGROUND)]
+        .spacing(t::SPACE_2)
+        .align_y(Alignment::Center);
+    figures = figures.push(stat::separator());
+    figures = figures.push(stat::figure(
+        sensitive,
+        "sensitive",
+        if sensitive > 0 { t::DESTRUCTIVE_TEXT } else { t::FOREGROUND },
+    ));
+    figures = figures.push(stat::separator());
+    figures = figures.push(stat::figure(groups.len(), "groups", t::FOREGROUND));
+
+    let mut body = column![figures].spacing(t::SPACE_6).width(Length::Fill);
 
     for (group, tools) in groups {
         let count = match tools.len() {
             1 => "1 tool".to_string(),
             n => format!("{n} tools"),
         };
+        // The rows are split by hairlines and have no card around them: the
+        // label and the count say where a group starts.
+        let mut list = column![].width(Length::Fill);
+        for (index, tool) in tools.iter().enumerate() {
+            if index > 0 {
+                list = list.push(components::hairline());
+            }
+            list = list.push(tool_row(tool));
+        }
         body = body.push(
             column![
                 components::section_head(
                     &group,
                     text(count).size(t::TEXT_XS).wrapping(text::Wrapping::None).style(theme::subtle),
                 ),
-                components::rows(tools.iter().map(|tool| tool_row(tool)).collect()),
+                components::hairline(),
+                list,
             ]
-            .spacing(t::SPACE_2),
+            .spacing(0.0),
         );
     }
 
@@ -393,7 +395,7 @@ fn tool_row<'a>(tool: &ToolSpec) -> Element<'a, Message> {
         takes,
     ]
     .spacing(t::SPACE_1_5)
-    .padding([t::SPACE_3, t::SPACE_3 + 2.0])
+    .padding([t::SPACE_3, 0.0])
     .width(Length::Fill)
     .into()
 }

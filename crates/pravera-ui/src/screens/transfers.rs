@@ -587,41 +587,35 @@ pub fn view<'a>(state: &'a State, now: Instant) -> Element<'a, Message> {
         ));
     }
 
+    // The two filesystems are two halves of the sheet, split by a hairline,
+    // and the ledger is the strip along its foot.
     let top: Element<'a, Message> = if state.connected {
         row![
             pane(state, Side::Remote, &state.host_name, now),
+            components::vrule(Length::Fill),
             pane(state, Side::Local, "This machine", now),
         ]
-        .spacing(t::GAP)
         .height(Length::Fill)
         .into()
     } else {
         nothing_connected()
     };
 
-    components::page(
-        motion::rise(header, motion::cascade(since, now, 0)),
-        column![
-            motion::rise(top, motion::cascade(since, now, 1)),
-            motion::rise(ledger(state, now), motion::cascade(since, now, 2)),
-        ]
-        .spacing(t::GAP)
-        .height(Length::Fill),
+    components::page_footed(
+        motion::settle(header, motion::cascade(since, now, 0)),
+        motion::settle(top, motion::cascade(since, now, 1)),
+        motion::settle(ledger(state, now), motion::cascade(since, now, 2)),
     )
 }
 
 fn nothing_connected<'a>() -> Element<'a, Message> {
-    components::panel(
-        container(components::empty(
-            icon::TRANSFERS,
-            "No session",
-            "A transfer needs a machine at the other end. Connect to one from Devices and both \
-             filesystems open here side by side. Anything that moved earlier stays in the ledger.",
-        ))
-        .center(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
+    container(components::empty(
+        icon::TRANSFERS,
+        "No session",
+        "A transfer needs a machine at the other end. Connect to one from Devices and both \
+         filesystems open here side by side. Anything that moved earlier stays in the ledger.",
+    ))
+    .center(Length::Fill)
     .into()
 }
 
@@ -706,7 +700,7 @@ fn pane<'a>(state: &'a State, side: Side, title: &'a str, now: Instant) -> Eleme
         rows(state, side, now)
     };
 
-    components::panel(
+    container(
         column![
             head,
             hairline(),
@@ -718,7 +712,6 @@ fn pane<'a>(state: &'a State, side: Side, title: &'a str, now: Instant) -> Eleme
         ]
         .clip(true),
     )
-    .padding(0)
     .width(Length::FillPortion(1))
     .height(Length::Fill)
     .into()
@@ -932,26 +925,28 @@ fn footer<'a>(state: &'a State, side: Side) -> Element<'a, Message> {
         Side::Local => icon::UPLOAD,
     };
 
-    button(
-        container(
-            row![
-                icon::stroked(glyph, t::ICON_SM, t::PRIMARY_FOREGROUND),
-                text(label)
-                    .size(t::TEXT_SM)
-                    .font(t::FONT_UI_MEDIUM)
-                    .wrapping(text::Wrapping::None),
-            ]
-            .spacing(t::SPACE_2)
-            .align_y(Alignment::Center),
+    components::glide(|hover| {
+        button(
+            container(
+                row![
+                    icon::stroked(glyph, t::ICON_SM, t::PRIMARY_FOREGROUND),
+                    text(label)
+                        .size(t::TEXT_SM)
+                        .font(t::FONT_UI_MEDIUM)
+                        .wrapping(text::Wrapping::None),
+                ]
+                .spacing(t::SPACE_2)
+                .align_y(Alignment::Center),
+            )
+            .center_x(Length::Fill)
+            .clip(true),
         )
-        .center_x(Length::Fill)
-        .clip(true),
-    )
-    .padding(components::BUTTON_PADDING_SM)
-    .width(Length::Fill)
-    .style(theme::primary_button)
-    .on_press(Message::Send(side))
-    .into()
+        .padding(components::BUTTON_PADDING_SM)
+        .width(Length::Fill)
+        .style(theme::gliding(hover, theme::primary_button))
+        .on_press(Message::Send(side))
+        .into()
+    })
 }
 
 /// What a pane says in place of a list: loading, empty, or why not.
@@ -1001,11 +996,13 @@ fn ledger<'a>(state: &'a State, now: Instant) -> Element<'a, Message> {
     };
 
     let clear: Element<'a, Message> = if finished > 0 {
-        button(components::label(Some(icon::CLOSE), "Clear finished", t::MUTED_FOREGROUND))
-            .padding(components::BUTTON_PADDING_SM)
-            .style(theme::ghost_button)
-            .on_press(Message::ClearFinished)
-            .into()
+        components::glide(|hover| {
+            button(components::label(Some(icon::CLOSE), "Clear finished", t::MUTED_FOREGROUND))
+                .padding(components::BUTTON_PADDING_SM)
+                .style(theme::gliding(hover, theme::ghost_button))
+                .on_press(Message::ClearFinished)
+                .into()
+        })
     } else {
         Space::new().into()
     };
@@ -1069,10 +1066,7 @@ fn ledger<'a>(state: &'a State, now: Instant) -> Element<'a, Message> {
         .into()
     };
 
-    components::panel(column![head, hairline(), body])
-        .padding(0)
-        .width(Length::Fill)
-        .into()
+    column![head, hairline(), body].width(Length::Fill).into()
 }
 
 fn job_row<'a>(job: &'a Job) -> Element<'a, Message> {
@@ -1107,7 +1101,7 @@ fn job_row<'a>(job: &'a Job) -> Element<'a, Message> {
     };
 
     let stop: Element<'a, Message> = if job.state == JobState::Running {
-        components::icon_button(icon::CLOSE, Some(Message::Cancel(job.id))).into()
+        components::icon_button(icon::CLOSE, Some(Message::Cancel(job.id)))
     } else {
         Space::new().width(Length::Fixed(t::CONTROL_HEIGHT_SM)).into()
     };

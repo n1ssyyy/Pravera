@@ -154,8 +154,8 @@ fn list_devices_tool() -> Tool {
 fn host_status_tool() -> Tool {
     Tool::new("host_status", "host")
         .describes(
-            "Report what this machine can do as a Pravera host right now — capture, input, \
-             clipboard, accounts file — each subsystem measured during this call.",
+            "Report what this machine can do as a Pravera host right now: capture, input, \
+             clipboard, accounts file; each subsystem measured during this call.",
         )
         .parameters(Parameters::new())
         .handles(|_| {
@@ -238,7 +238,7 @@ fn list_displays_tool() -> Tool {
 fn move_pointer_tool() -> Tool {
     Tool::new("move_pointer", "input")
         .describes(
-            "Move this machine's mouse pointer — to absolute desktop pixels with x/y, or by a \
+            "Move this machine's mouse pointer, to absolute desktop pixels with x/y, or by a \
              relative delta with dx/dy. There is no undo: it moves wherever the desktop puts \
              it.",
         )
@@ -383,7 +383,7 @@ fn send_keys_tool() -> Tool {
 fn clipboard_read_tool() -> Tool {
     Tool::new("clipboard_read", "files")
         .describes(
-            "Read this machine's clipboard text verbatim — quite possibly the most recent thing \
+            "Read this machine's clipboard text verbatim, quite possibly the most recent thing \
              its user copied, which may well be a password. Text only.",
         )
         .sensitive(true)
@@ -417,7 +417,7 @@ fn list_users_tool() -> Tool {
     Tool::new("list_users", "host")
         .describes(
             "List who may sign in to this machine, read straight from its accounts file: \
-             usernames, roles, enabled. No password material is included — hashes stay in the \
+             usernames, roles, enabled. No password material is included; hashes stay in the \
              file, passwords were never stored anywhere.",
         )
         .parameters(Parameters::new())

@@ -296,7 +296,7 @@ fn send(events: &[INPUT]) -> Result<()> {
     let error = unsafe { GetLastError() };
     if error == ERROR_ACCESS_DENIED {
         return Err(InputError::Refused(
-            "blocked by UIPI — the foreground window is running at a higher \
+            "blocked by UIPI: the foreground window is running at a higher \
              integrity level than the Pravera agent"
                 .to_owned(),
         ));

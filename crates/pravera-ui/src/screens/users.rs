@@ -54,8 +54,8 @@ const ROSTER: f32 = 280.0;
 /// Height of one roster row.
 const ROW: f32 = 32.0;
 
-/// Height of one capability cell.
-const CELL: f32 = 38.0;
+/// Height of one capability row.
+const CELL: f32 = 36.0;
 
 /// Capability chips per row in the grid.
 ///
@@ -73,6 +73,10 @@ const MAX_ROWS: usize = 64;
 const SLOT_NEW_ROLE: usize = MAX_ROWS * 2;
 const SLOT_CELLS: usize = SLOT_NEW_ROLE + 1;
 const HOVER_SLOTS: usize = SLOT_CELLS + Permission::ALL.len();
+
+/// Marks the new-account form as the owner of the role bar's tile, which no
+/// account's name can be: names cannot hold a NUL.
+const NEW_ACCOUNT: &str = "\u{0}new";
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -142,6 +146,12 @@ pub struct State {
     error: Option<String>,
     /// Per-capability, so a role change ripples across the grid.
     cells: Vec<iced::Animation<bool>>,
+    /// The tile under the role bar's chosen role.
+    role_thumb: motion::Thumb,
+    /// Whose role the tile is under: an account's name, or a marker for the
+    /// new-account form. A different owner takes the tile there at once, and
+    /// only a change of the same owner's role slides it.
+    role_thumb_for: Option<String>,
     hover: HoverTracker,
     /// When the page last arrived; its panels cascade in from here.
     arrived: Instant,
@@ -177,6 +187,8 @@ impl Default for State {
             cells: (0..Permission::ALL.len())
                 .map(|_| iced::Animation::new(false))
                 .collect(),
+            role_thumb: motion::Thumb::at(0),
+            role_thumb_for: None,
             hover: HoverTracker::new(HOVER_SLOTS),
             arrived: Instant::now(),
         }
@@ -277,8 +289,31 @@ impl State {
         self.sync_cells(now);
     }
 
+    /// Point the role bar's tile at the role now showing. A change of the role
+    /// of the account (or form) already showing slides it; showing another
+    /// account's, or the form, puts it there.
+    fn sync_thumb(&mut self, now: Instant) {
+        let (owner, role) = if self.adding {
+            (NEW_ACCOUNT.to_string(), self.new_role.clone())
+        } else if let Some(account) = self.selected() {
+            (account.username.clone(), account.role.clone())
+        } else {
+            return;
+        };
+        let Some(index) = self.roles.iter().position(|r| r.name == role) else {
+            return;
+        };
+        if self.role_thumb_for.as_deref() == Some(owner.as_str()) {
+            self.role_thumb.select(index, now);
+        } else {
+            self.role_thumb.snap(index);
+            self.role_thumb_for = Some(owner);
+        }
+    }
+
     /// Point every capability cell at what is currently granted.
     fn sync_cells(&mut self, now: Instant) {
+        self.sync_thumb(now);
         let held = self.showing_permissions();
         for (index, flag) in Permission::ALL.iter().enumerate() {
             let lit = held.contains(*flag);
@@ -329,6 +364,7 @@ impl State {
     pub fn is_animating(&self, now: Instant) -> bool {
         self.hover.is_animating(now)
             || self.cells.iter().any(|a| a.is_animating(now))
+            || self.role_thumb.is_animating(now)
             || motion::cascading(self.arrived, now)
     }
 
@@ -537,27 +573,19 @@ pub fn update(state: &mut State, message: Message, now: Instant) -> Outcome {
 
 pub fn view<'a>(state: &'a State, now: Instant) -> Element<'a, Message> {
     let since = state.arrived;
-    let header = motion::rise(header(state), motion::cascade(since, now, 0));
+    let header = motion::settle(header(state), motion::cascade(since, now, 0));
 
     // With nothing to list, the two lists are two empty boxes. Say the thing
     // instead; the form takes its place once it is asked for.
     if state.accounts().is_empty() && !state.is_adding() {
-        return components::page(header, motion::rise(nobody(), motion::cascade(since, now, 1)));
+        return components::page(header, motion::settle(nobody(), motion::cascade(since, now, 1)));
     }
 
-    components::page(
+    components::page_split(
         header,
-        row![
-            motion::rise(
-                container(lists(state, now))
-                    .width(Length::Fixed(ROSTER))
-                    .height(Length::Fill),
-                motion::cascade(since, now, 1),
-            ),
-            motion::rise(detail(state, now), motion::cascade(since, now, 2)),
-        ]
-        .spacing(t::GAP)
-        .height(Length::Fill),
+        motion::settle(lists(state, now), motion::cascade(since, now, 1)),
+        ROSTER,
+        motion::settle(detail(state, now), motion::cascade(since, now, 2)),
     )
 }
 
@@ -605,26 +633,21 @@ fn header<'a>(state: &'a State) -> Element<'a, Message> {
 /// The state that matters most on this screen, said plainly, with the one
 /// thing that fixes it right under it.
 fn nobody<'a>() -> Element<'a, Message> {
-    components::panel(
-        container(
-            components::empty(
-                icon::USERS,
-                "Nobody can connect to this machine",
-                "Pravera has its own accounts, separate from the ones you sign in to Windows or \
-                 Linux with. Until one exists here, every connection is refused — including yours.",
-            )
-            .push(Space::new().height(t::SPACE_2))
-            .push(components::primary_button(
-                Some(icon::PLUS),
-                "Add account",
-                Some(Message::ToggleAdding),
-            )),
+    container(
+        components::empty(
+            icon::USERS,
+            "Nobody can connect to this machine",
+            "Pravera has its own accounts, separate from the ones you sign in to Windows or \
+             Linux with. Until one exists here, every connection is refused, including yours.",
         )
-        .center(Length::Fill),
+        .push(Space::new().height(t::SPACE_2))
+        .push(components::primary_button(
+            Some(icon::PLUS),
+            "Add account",
+            Some(Message::ToggleAdding),
+        )),
     )
-    .padding(0)
-    .width(Length::Fill)
-    .height(Length::Fill)
+    .center(Length::Fill)
     .into()
 }
 
@@ -898,7 +921,7 @@ fn account_detail<'a>(state: &'a State, account: &'a Account, now: Instant) -> E
 
     body.push(components::section(
         "Role",
-        role_choice(state.roles(), &account.role, Message::AssignRole),
+        role_choice(state, now, Message::AssignRole),
     ))
     .push(capabilities(state, now, false))
     .push(components::hairline())
@@ -959,36 +982,32 @@ fn role_detail<'a>(state: &'a State, role: &'a RoleView, now: Instant) -> Elemen
     body.into()
 }
 
-/// The grid. All ten, always: six lit cells say nothing about how much is
-/// withheld without the four dark ones beside them.
+/// The list. All ten, always: six lit rows say nothing about how much is
+/// withheld without the four dim ones beside them. Two columns of plain rows,
+/// each split from the next by a hairline; the rows read left to right, then
+/// down, the way the flags are declared.
 fn capabilities<'a>(state: &'a State, now: Instant, editable: bool) -> Element<'a, Message> {
     let held = state.showing_permissions().iter().count();
 
-    let mut grid = column![].spacing(t::SPACE_2);
-    let mut line = row![].spacing(t::SPACE_2);
+    let mut columns: Vec<iced::widget::Column<'a, Message>> = (0..GRID_COLUMNS).map(|_| column![]).collect();
     for (index, flag) in Permission::ALL.iter().enumerate() {
         let slot = SLOT_CELLS + index;
-        line = line.push(capability(
+        let side = index % GRID_COLUMNS;
+        let mut list = std::mem::replace(&mut columns[side], column![]);
+        if index >= GRID_COLUMNS {
+            list = list.push(components::hairline());
+        }
+        columns[side] = list.push(capability(
             *flag,
             state.cell(index, now),
             editable,
             state.hovered(slot, now),
-            slot,
         ));
-        if (index + 1) % GRID_COLUMNS == 0 {
-            grid = grid.push(line);
-            line = row![].spacing(t::SPACE_2);
-        }
     }
 
-    // An odd number of flags would otherwise leave the last one stretched
-    // across the full width, which reads as emphasis rather than as a leftover.
-    let short = Permission::ALL.len() % GRID_COLUMNS;
-    if short != 0 {
-        for _ in short..GRID_COLUMNS {
-            line = line.push(Space::new().width(Length::Fill));
-        }
-        grid = grid.push(line);
+    let mut grid = row![].spacing(t::SPACE_6);
+    for list in columns {
+        grid = grid.push(container(list.width(Length::Fill)).width(Length::FillPortion(1)));
     }
 
     column![
@@ -1001,18 +1020,19 @@ fn capabilities<'a>(state: &'a State, now: Instant, editable: bool) -> Element<'
         ),
         grid,
     ]
-    .spacing(t::SPACE_3)
+    .spacing(t::SPACE_2)
     .into()
 }
 
-/// One capability. Granted cells are raised and marked; withheld ones are
-/// sunk into the card, their words still readable — the withheld half is
-/// exactly as important as the granted one. On a role that can be edited,
-/// the mark is a switch and the whole cell flips it.
-fn capability<'a>(flag: Permission, lit: f32, editable: bool, hover: f32, slot: usize) -> Element<'a, Message> {
+/// One capability, as a plain row. Granted ones carry a filled mark, withheld
+/// ones an empty ring, their words still readable: the withheld half is exactly
+/// as important as the granted one. On a role that can be edited the mark
+/// gives way to a switch and the whole row is the control, lifting under the
+/// pointer and settling when pressed.
+fn capability<'a>(flag: Permission, lit: f32, editable: bool, hover: f32) -> Element<'a, Message> {
     // The two that are different in kind get a warning colour when held.
     // `ELEVATE` means approving UAC prompts and `ADMIN` means changing this
-    // screen from the other end; both are worth spotting in a grid you skim.
+    // screen from the other end; both are worth spotting in a list you skim.
     let held_tint = if flag == Permission::ADMIN || flag == Permission::ELEVATE {
         t::WARNING
     } else {
@@ -1048,36 +1068,42 @@ fn capability<'a>(flag: Permission, lit: f32, editable: bool, hover: f32, slot: 
             .into()
     };
 
-    let edge = theme::blend(
-        theme::blend(t::NEUTRAL_825, t::BEVEL_RAISED.sides, lit),
-        t::BEVEL_HOVER.top,
-        hover * 0.6,
-    );
-    let cell = container(body)
-        .padding([0.0, t::SPACE_3])
-        .height(Length::Fixed(CELL))
-        .center_y(Length::Fixed(CELL))
-        .width(Length::Fill)
-        .style(move |_| container::Style {
-            background: Some(Background::Color(theme::blend(t::BACKGROUND, t::ROW, lit))),
-            border: Border {
-                color: edge,
-                width: 1.0,
-                radius: t::RADIUS.into(),
-            },
-            ..container::Style::default()
-        });
-
     if !editable {
-        return cell.into();
+        return container(body)
+            .padding([0.0, t::SPACE_2])
+            .height(Length::Fixed(CELL))
+            .center_y(Length::Fixed(CELL))
+            .width(Length::Fill)
+            .into();
     }
 
-    mouse_area(cell)
-        .on_press(Message::ToggleCapability(flag))
-        .on_enter(Message::Hover(slot, true))
-        .on_exit(Message::Hover(slot, false))
-        .interaction(iced::mouse::Interaction::Pointer)
+    let surface = button(container(body).center_y(Length::Fill).width(Length::Fill).height(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fixed(CELL))
+        .padding([0.0, t::SPACE_2])
+        .style(move |_, status| button::Style {
+            background: Some(Background::Color(match status {
+                button::Status::Pressed => t::NEUTRAL_825,
+                _ => t::with_alpha(t::NEUTRAL_800, hover * 0.8),
+            })),
+            text_color: t::FOREGROUND,
+            border: Border {
+                radius: t::RADIUS.into(),
+                ..Border::default()
+            },
+            ..button::Style::default()
+        })
+        .on_press(Message::ToggleCapability(flag));
+
+    mouse_area(surface)
+        .on_enter(Message::Hover(SLOT_CELLS + flag_index(flag), true))
+        .on_exit(Message::Hover(SLOT_CELLS + flag_index(flag), false))
         .into()
+}
+
+/// Where a flag sits in [`Permission::ALL`], which is also its hover slot.
+fn flag_index(flag: Permission) -> usize {
+    Permission::ALL.iter().position(|other| *other == flag).unwrap_or(0)
 }
 
 fn account_actions<'a>(state: &'a State, account: &'a Account) -> Element<'a, Message> {
@@ -1088,22 +1114,28 @@ fn account_actions<'a>(state: &'a State, account: &'a Account) -> Element<'a, Me
     };
 
     let arming = state.is_arming();
-    let remove = button(components::label(
-        Some(icon::TRASH),
-        if arming { "Remove for good" } else { "Remove" },
-        if arming {
-            t::DESTRUCTIVE_FOREGROUND
-        } else {
-            t::DESTRUCTIVE_TEXT
-        },
-    ))
-    .padding(components::BUTTON_PADDING_SM)
-    .style(if arming {
-        theme::destructive_button
-    } else {
-        theme::danger_ghost_button
-    })
-    .on_press(Message::Remove);
+    let remove = components::glide(|hover| {
+        button(components::label(
+            Some(icon::TRASH),
+            if arming { "Remove for good" } else { "Remove" },
+            if arming {
+                t::DESTRUCTIVE_FOREGROUND
+            } else {
+                t::DESTRUCTIVE_TEXT
+            },
+        ))
+        .padding(components::BUTTON_PADDING_SM)
+        .style(theme::gliding(
+            hover,
+            if arming {
+                theme::destructive_button
+            } else {
+                theme::danger_ghost_button
+            },
+        ))
+        .on_press(Message::Remove)
+        .into()
+    });
 
     let mut line = row![
         components::small_button(Some(toggle_icon), toggle_label, Some(Message::ToggleEnabled)),
@@ -1113,12 +1145,13 @@ fn account_actions<'a>(state: &'a State, account: &'a Account) -> Element<'a, Me
     .align_y(Alignment::Center);
     // Armed, the way back is right beside the way through.
     if arming {
-        line = line.push(
+        line = line.push(components::glide(|hover| {
             button(components::label(None, "Keep", t::FOREGROUND))
                 .padding(components::BUTTON_PADDING_SM)
-                .style(theme::ghost_button)
-                .on_press(Message::CancelRemove),
-        );
+                .style(theme::gliding(hover, theme::ghost_button))
+                .on_press(Message::CancelRemove)
+                .into()
+        }));
     }
     line.push(remove).into()
 }
@@ -1136,10 +1169,13 @@ fn role_actions<'a>(role: &'a RoleView) -> Element<'a, Message> {
 
     row![
         Space::new().width(Length::Fill),
-        button(components::label(Some(icon::TRASH), "Remove role", t::DESTRUCTIVE_TEXT))
-            .padding(components::BUTTON_PADDING_SM)
-            .style(theme::danger_ghost_button)
-            .on_press(Message::RemoveRole(role.name.clone())),
+        components::glide(|hover| {
+            button(components::label(Some(icon::TRASH), "Remove role", t::DESTRUCTIVE_TEXT))
+                .padding(components::BUTTON_PADDING_SM)
+                .style(theme::gliding(hover, theme::danger_ghost_button))
+                .on_press(Message::RemoveRole(role.name.clone()))
+                .into()
+        }),
     ]
     .align_y(Alignment::Center)
     .into()
@@ -1161,7 +1197,7 @@ fn new_account<'a>(state: &'a State, now: Instant) -> Element<'a, Message> {
             field("Password", "password", state.new_password(), true, Message::NewPassword),
         ]
         .spacing(t::SPACE_4),
-        components::section("Role", role_choice(state.roles(), state.new_role(), Message::NewRole)),
+        components::section("Role", role_choice(state, now, Message::NewRole)),
         // What the choice above actually buys, before it is made rather than
         // after. The same ten cells the rest of the screen uses.
         capabilities(state, now, false),
@@ -1192,15 +1228,18 @@ fn new_account<'a>(state: &'a State, now: Instant) -> Element<'a, Message> {
 /// for a new account, because those are the same decision and drifting apart
 /// would make the second look like a different kind of thing.
 fn role_choice<'a>(
-    roles: &'a [RoleView],
-    current: &str,
+    state: &'a State,
+    now: Instant,
     on_pick: impl Fn(String) -> Message + 'a,
 ) -> Element<'a, Message> {
     components::segmented(
-        roles
+        state
+            .roles()
             .iter()
-            .map(|role| (role.name.clone(), role.name == current, on_pick(role.name.clone())))
+            .map(|role| (role.name.clone(), on_pick(role.name.clone())))
             .collect(),
+        &state.role_thumb,
+        now,
     )
 }
 

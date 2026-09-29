@@ -62,7 +62,7 @@ async fn timed<T>(
     match tokio::time::timeout(HANDSHAKE_STEP, future).await {
         Ok(result) => result.map_err(describe),
         Err(_) => Err(format!(
-            "{step} timed out after {} seconds. The machine answered the dial but stopped there — \
+            "{step} timed out after {} seconds. The machine answered the dial but stopped there: \
              check it is still running this version of Pravera.",
             HANDSHAKE_STEP.as_secs()
         )),
