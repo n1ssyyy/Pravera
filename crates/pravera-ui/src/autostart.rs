@@ -63,6 +63,11 @@ pub fn set(enabled: bool) -> Result<(), String> {
         platform::disable()
     };
 
+    match &result {
+        Ok(()) => tracing::info!(enabled, "the sign-in entry was changed"),
+        Err(error) => tracing::warn!(enabled, %error, "the sign-in entry could not be changed"),
+    }
+
     result.map_err(|error| {
         if enabled {
             format!("Pravera could not register itself to start at sign-in: {error}")
@@ -96,20 +101,34 @@ fn command_line(exe: &std::path::Path) -> String {
 
 #[cfg(windows)]
 mod platform {
-    //! A Task Scheduler entry that runs at sign-in with the highest privileges
-    //! the signed-in account has.
+    //! A Task Scheduler entry that runs at sign-in.
     //!
     //! This used to be `HKCU\...\Run`, which is simpler, per-user, and visible
     //! in Task Manager's Startup tab. It stopped being an option the moment
     //! Pravera started asking for elevation: Windows will not raise a Run entry
-    //! through UAC at sign-in — there is nobody to answer the prompt yet — so an
-    //! elevated executable registered there is one that silently never starts.
+    //! through UAC at sign-in, because there is nobody to answer the prompt yet,
+    //! so an elevated executable registered there is one that silently never
+    //! starts.
     //!
     //! A scheduled task marked `HighestAvailable` starts elevated with no
     //! prompt, which is the same arrangement every other remote-access tool
     //! uses before it has a real service. It is still findable and removable:
     //! it appears in Task Scheduler under its own name, and [`disable`] removes
     //! it.
+    //!
+    //! ## Whose privileges the task asks for
+    //!
+    //! Only an elevated process may create a `HighestAvailable` task. Windows
+    //! answers "Access is denied" to an ordinary one, and Pravera is an
+    //! ordinary process by design (its manifest says `asInvoker`), so asking
+    //! for `HighestAvailable` from the Settings switch made the switch fail
+    //! for every person who did not happen to have started Pravera as an
+    //! administrator. The task therefore asks for what its creator has: an
+    //! elevated Pravera registers a task that starts elevated, and an ordinary
+    //! one registers a task that starts ordinary, which is what it would have
+    //! got by being double-clicked. A person who wants Pravera elevated at
+    //! sign-in gets that from the boot service, which is the mechanism built
+    //! for it.
     //!
     //! The task is written as XML rather than assembled from `schtasks` flags,
     //! because the flags leave the defaults in place and two of those defaults
@@ -247,6 +266,12 @@ mod platform {
         queried == ERROR_SUCCESS && size > 0
     }
 
+    /// Whether this process holds the rights a `HighestAvailable` task needs
+    /// from its creator.
+    fn elevated() -> bool {
+        pravera_capture::is_elevated()
+    }
+
     pub fn enable(exe: &Path) -> std::io::Result<()> {
         // A machine that ran a version of Pravera from before the task existed
         // still has that version's sign-in entry, pointing at an executable
@@ -257,7 +282,15 @@ mod platform {
         // replaced it.
         forget_the_old_run_entry();
 
-        let xml = definition(exe)?;
+        create(&task_name(), exe, elevated())
+    }
+
+    /// Register the task under `name`.
+    ///
+    /// `name` is a parameter so a test can register one that is not the real
+    /// one and remove it again.
+    fn create(name: &str, exe: &Path, highest: bool) -> std::io::Result<()> {
+        let xml = definition_named(name, exe, highest)?;
 
         // UTF-16 with a byte-order mark. `schtasks /XML` reads the file as
         // ANSI otherwise, and a path with a non-ASCII character in it — a
@@ -267,13 +300,15 @@ mod platform {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
 
-        let path = std::env::temp_dir().join("pravera-autostart.xml");
+        // Per process, so two Praveras registering at once do not overwrite each
+        // other's definition between the write and the read.
+        let path = std::env::temp_dir().join(format!("pravera-autostart-{}.xml", std::process::id()));
         std::fs::write(&path, &bytes)?;
 
         let result = schtasks(&[
             "/Create",
             "/TN",
-            &task_name(),
+            name,
             "/XML",
             &path.to_string_lossy(),
             // Replace whatever is registered. The executable may have moved
@@ -300,8 +335,10 @@ mod platform {
         };
         let low = said.to_ascii_lowercase();
         if low.contains("access is denied") || low.contains("denied") {
+            // Only reachable when a task made by an elevated Pravera is in the
+            // way: an ordinary process may replace its own task, not that one.
             return Err(std::io::Error::other(
-                "Pravera could not register to start at sign-in without elevation. Run Pravera once as administrator and toggle it again.",
+                "Windows would not replace the existing sign-in entry, because an administrator's Pravera made it. Remove it in Task Scheduler (it is called Pravera), or turn it off from an elevated Pravera, then try again.",
             ));
         }
         Err(std::io::Error::other(said.trim().to_string()))
@@ -350,7 +387,7 @@ mod platform {
         let low = said.to_ascii_lowercase();
         if low.contains("access is denied") || low.contains("denied") {
             return Err(std::io::Error::other(
-                "Pravera could not change the sign-in task without elevation. Run Pravera once as administrator and toggle it again.",
+                "Windows would not remove the sign-in entry, because an administrator's Pravera made it. Remove it in Task Scheduler (it is called Pravera), or turn it off from an elevated Pravera.",
             ));
         }
         Err(std::io::Error::other(said.trim().to_string()))
@@ -425,7 +462,20 @@ mod platform {
             .replace('"', "&quot;")
     }
 
-    fn definition(exe: &Path) -> std::io::Result<String> {
+    /// `highest` asks for the highest privileges the account has, which only an
+    /// elevated creator is allowed to; otherwise the task runs as an ordinary
+    /// process of the signed-in user.
+    #[cfg(test)]
+    fn definition(exe: &Path, highest: bool) -> std::io::Result<String> {
+        definition_named(&task_name(), exe, highest)
+    }
+
+    fn definition_named(name: &str, exe: &Path, highest: bool) -> std::io::Result<String> {
+        let run_level = if highest {
+            "HighestAvailable"
+        } else {
+            "LeastPrivilege"
+        };
         let user = escape(&current_user());
         let command = escape(&exe.display().to_string());
         let flag = super::HIDDEN_FLAG;
@@ -447,7 +497,7 @@ mod platform {
     <Principal id="Author">
       <UserId>{user}</UserId>
       <LogonType>InteractiveToken</LogonType>
-      <RunLevel>HighestAvailable</RunLevel>
+      <RunLevel>{run_level}</RunLevel>
     </Principal>
   </Principals>
   <Settings>
@@ -477,7 +527,7 @@ mod platform {
   </Actions>
 </Task>
 "#,
-            name = escape(&task_name()),
+            name = escape(name),
         ))
     }
 
@@ -486,11 +536,11 @@ mod platform {
         use super::*;
 
         #[test]
-        fn the_task_runs_with_the_highest_privileges_available() {
+        fn an_elevated_creator_registers_a_task_that_starts_elevated() {
             // Without this the task starts Pravera unelevated, and an
-            // unelevated Pravera cannot inject input into an elevated window —
+            // unelevated Pravera cannot inject input into an elevated window,
             // which is most of why it asks for elevation at all.
-            let xml = definition(Path::new(r"C:\Pravera\pravera.exe")).expect("a definition");
+            let xml = definition(Path::new(r"C:\Pravera\pravera.exe"), true).expect("a definition");
             assert!(
                 xml.contains("<RunLevel>HighestAvailable</RunLevel>"),
                 "{xml}"
@@ -498,11 +548,57 @@ mod platform {
         }
 
         #[test]
+        fn an_ordinary_creator_registers_a_task_it_is_allowed_to_create() {
+            // The bug: this was `HighestAvailable` unconditionally, and Task
+            // Scheduler answers "Access is denied" to an ordinary process
+            // asking for that, so the Settings switch could never turn on.
+            let xml = definition(Path::new(r"C:\Pravera\pravera.exe"), false).expect("a definition");
+            assert!(xml.contains("<RunLevel>LeastPrivilege</RunLevel>"), "{xml}");
+            assert!(!xml.contains("HighestAvailable"), "{xml}");
+        }
+
+        #[test]
+        #[ignore = "creates and deletes a real scheduled task; run with --ignored"]
+        fn an_ordinary_process_can_register_and_remove_the_sign_in_task() {
+            // The whole path against the real Task Scheduler, under a name
+            // that is not the real entry, and only when this test is not
+            // itself elevated: an elevated run would prove nothing about the
+            // case that failed.
+            if elevated() {
+                eprintln!("skipped: this run is elevated");
+                return;
+            }
+            let name = format!("PraveraTest-{}", std::process::id());
+            let exe = std::env::current_exe().expect("this test binary has a path");
+
+            // What the switch used to ask for, and what Windows said to it.
+            let refused = create(&format!("{name}-highest"), &exe, true)
+                .expect_err("an ordinary process may not register a HighestAvailable task");
+            assert!(
+                refused.to_string().contains("administrator"),
+                "the refusal should say what to do about it: {refused}"
+            );
+
+            create(&name, &exe, false).expect("an ordinary process may register its own task");
+
+            let queried = schtasks(&["/Query", "/TN", &name, "/XML"]).expect("schtasks runs");
+            let listed = String::from_utf8_lossy(&queried.stdout).into_owned();
+            let removed = schtasks(&["/Delete", "/TN", &name, "/F"]).expect("schtasks runs");
+
+            assert!(queried.status.success(), "the task was not registered: {listed}");
+            // Task Scheduler writes `LeastPrivilege` back as the absence of a
+            // run level, because it is the default.
+            assert!(!listed.contains("HighestAvailable"), "{listed}");
+            assert!(listed.contains("<LogonTrigger>"), "{listed}");
+            assert!(removed.status.success(), "the test task was left behind: {name}");
+        }
+
+        #[test]
         fn the_task_is_not_stopped_after_three_days() {
             // `schtasks` defaults to a 72-hour execution limit. A host that
             // stops being reachable after a long weekend is a host nobody can
             // rely on.
-            let xml = definition(Path::new(r"C:\Pravera\pravera.exe")).expect("a definition");
+            let xml = definition(Path::new(r"C:\Pravera\pravera.exe"), false).expect("a definition");
             assert!(
                 xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"),
                 "{xml}"
@@ -511,7 +607,7 @@ mod platform {
 
         #[test]
         fn a_laptop_still_starts_pravera_on_battery() {
-            let xml = definition(Path::new(r"C:\Pravera\pravera.exe")).expect("a definition");
+            let xml = definition(Path::new(r"C:\Pravera\pravera.exe"), false).expect("a definition");
             assert!(
                 xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"),
                 "{xml}"
@@ -524,7 +620,7 @@ mod platform {
 
         #[test]
         fn the_registered_task_starts_hidden() {
-            let xml = definition(Path::new(r"C:\Pravera\pravera.exe")).expect("a definition");
+            let xml = definition(Path::new(r"C:\Pravera\pravera.exe"), false).expect("a definition");
             assert!(
                 xml.contains(&format!(
                     "<Arguments>{}</Arguments>",
@@ -538,7 +634,7 @@ mod platform {
         fn a_path_with_an_ampersand_in_it_still_produces_valid_xml() {
             // `C:\Users\A & B\pravera.exe` is a legal path and an illegal XML
             // document, and the failure would be a task that never registers.
-            let xml = definition(Path::new(r"C:\Users\A & B\pravera.exe")).expect("a definition");
+            let xml = definition(Path::new(r"C:\Users\A & B\pravera.exe"), false).expect("a definition");
             assert!(xml.contains(r"C:\Users\A &amp; B\pravera.exe"), "{xml}");
             assert!(
                 !xml.contains("B\\pravera.exe</Command>\n      <Arguments>&"),

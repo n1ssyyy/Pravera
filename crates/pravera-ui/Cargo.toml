@@ -64,6 +64,13 @@ webpki-roots = "1"
 sha2 = "0.10"
 semver = "1"
 
+[dev-dependencies]
+# Headless interface tests: a real `UserInterface` over a software renderer,
+# fed real events, with no window and no GPU. Both are what `iced` itself
+# resolves, so they add no second copy.
+iced_runtime = "0.14"
+iced_tiny_skia = "0.14"
+
 [build-dependencies]
 winres = "0.1"
 resvg = { version = "0.44", default-features = false, features = ["text"] }

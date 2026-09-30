@@ -19,8 +19,9 @@
 //! portable `pravera.exe` needs nothing beside it. An elevated process (the
 //! agent the service starts with the user's elevated token, or a run as
 //! administrator) does everything itself. A standard-user process cannot stage
-//! a driver or create a device, so it reports "run once as administrator"
-//! instead of failing with a cryptic code. There is deliberately no
+//! a driver or create a device, so it reports that it needs administrator rights
+//! instead of failing with a cryptic code; the interface then asks Windows for
+//! them (see `pravera_ui::elevate`). There is deliberately no
 //! test-pattern fallback: a headless machine streams a real display or refuses.
 //!
 //! What is deliberately not done unconditionally is creating the display. The
@@ -292,9 +293,10 @@ pub fn is_elevated() -> bool {
     false
 }
 
-/// The sentence the UI shows when driver work needs one elevated launch.
+/// The sentence the UI shows when driver work is refused for want of
+/// administrator rights.
 pub fn needs_elevation_message() -> &'static str {
-    "The virtual display driver needs one elevated launch to install: right-click pravera.exe -> Run as administrator (or let the Pravera service start it). The display then appears by itself and stays across reboots. Hosting refuses until then rather than streaming a test pattern."
+    "The virtual display driver needs administrator rights to install. In Pravera, open Settings, then Displays, and choose Add 1920x1080 display: Windows asks for permission once. The display then appears by itself and stays across reboots. Hosting refuses until then rather than streaming a test pattern."
 }
 
 /// What the automatic paths should do about this machine's screens.

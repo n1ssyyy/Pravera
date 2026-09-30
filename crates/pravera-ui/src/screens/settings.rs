@@ -63,14 +63,19 @@ pub enum Message {
     CopyCode,
     /// Register or unregister Pravera to start when this user signs in.
     ToggleAtSignIn,
+    /// Register the boot service, or remove it if it is registered. Asks
+    /// Windows for administrator rights, because that is what it takes.
+    ToggleBootService,
+    /// Clear the note or error under the Startup rows.
+    DismissStartupNote,
     /// Whether starting Pravera should also start hosting.
     ToggleHostAtLaunch,
     DismissVirtualNotice,
     /// Add a real 1920x1080 virtual display via the bundled IDD driver.
-    /// Needs one elevated launch; otherwise reports how to get there.
+    /// Needs administrator rights, which Windows is asked for.
     AddVirtualDisplay,
     /// Stage the bundled IDD driver package (`pnputil /add-driver`).
-    /// Needs elevation; otherwise reports how to get there.
+    /// Needs administrator rights, which Windows is asked for.
     InstallDriver,
     /// Ask the release feed now rather than at the next scheduled check.
     CheckForUpdates,
@@ -131,9 +136,12 @@ pub enum Service {
     /// Registered. This machine starts Pravera at boot and again after every
     /// sign-out, whether or not anybody signs in.
     Installed,
-    /// Not registered, and cannot be from here — registering a service needs
-    /// an elevated process. Not a fault: everything else works.
-    NeedsElevation,
+    /// Not registered. Registering needs administrator rights, which the button
+    /// beside this row asks Windows for. Not a fault: everything else works.
+    NotRegistered,
+    /// Registered, but for another copy of Pravera: this file moved, or a
+    /// different one set the service up.
+    Elsewhere,
     /// Windows refused, in its own words. Carried rather than summarised,
     /// because an unusual refusal is exactly the case a generic sentence
     /// would strand somebody in.
@@ -169,9 +177,29 @@ pub struct Unattended {
     /// Which capture backend is in use, named as the backend names itself.
     /// `synthetic` is the test-harness override.
     pub capture_backend: String,
-    /// Whether the machine comes back at boot rather than at sign-in. Read
-    /// once when Pravera started, because it describes what this launch did.
+    /// Whether the machine comes back at boot rather than at sign-in. Read on
+    /// start and again on every visit to Settings.
     pub service: Service,
+    /// The boot service is being changed, and Windows is waiting for a person
+    /// to answer its prompt.
+    pub boot_pending: bool,
+    /// Any administrator job is running, so the others wait their turn.
+    pub elevating: bool,
+}
+
+/// Something to say under the Startup rows.
+///
+/// Its own field rather than `error`: that one is Hosting's, and is drawn only
+/// on the Hosting page, so a startup failure stored there could never be seen
+/// from the page the switch is on. That is how "Start Pravera when I sign in"
+/// used to fail with no sign of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Startup {
+    /// Nothing went wrong, and nothing changed: the person said no to the
+    /// Windows prompt.
+    Note(String),
+    /// Something went wrong, in words fit to show.
+    Error(String),
 }
 
 pub struct State {
@@ -191,6 +219,8 @@ pub struct State {
     /// Last virtual-display action, if any. Cleared when the card is dismissed
     /// or another action is taken.
     virtual_notice: Option<String>,
+    /// What last happened to the Startup rows, if it is worth saying.
+    startup: Option<Startup>,
     hover: HoverTracker,
     /// When the page last arrived; its panels cascade in from here.
     arrived: Instant,
@@ -232,6 +262,7 @@ impl Default for State {
             error: None,
             copied: false,
             virtual_notice: None,
+            startup: None,
             hover: HoverTracker::new(HOVER_SLOTS),
             arrived: Instant::now(),
             switches: std::collections::HashMap::new(),
@@ -326,6 +357,24 @@ impl State {
 
     pub fn copied(&mut self) {
         self.copied = true;
+    }
+
+    /// Something happened to the Startup rows that is not a failure.
+    pub fn startup_note(&mut self, words: String) {
+        self.startup = Some(Startup::Note(words));
+    }
+
+    /// Something failed under the Startup rows.
+    pub fn startup_error(&mut self, words: String) {
+        self.startup = Some(Startup::Error(words));
+    }
+
+    pub fn clear_startup(&mut self) {
+        self.startup = None;
+    }
+
+    pub fn startup(&self) -> Option<&Startup> {
+        self.startup.as_ref()
     }
 
     pub fn virtual_result(&mut self, msg: String) {
@@ -469,6 +518,11 @@ pub fn update(state: &mut State, message: Message, now: Instant) -> Option<Messa
         Message::ToggleHosting => Some(Message::ToggleHosting),
         Message::CopyCode => Some(Message::CopyCode),
         Message::ToggleAtSignIn => Some(Message::ToggleAtSignIn),
+        Message::ToggleBootService => Some(Message::ToggleBootService),
+        Message::DismissStartupNote => {
+            state.clear_startup();
+            None
+        }
         Message::ToggleHostAtLaunch => Some(Message::ToggleHostAtLaunch),
         Message::AddVirtualDisplay => Some(Message::AddVirtualDisplay),
         Message::InstallDriver => Some(Message::InstallDriver),
@@ -938,7 +992,7 @@ fn saved_accounts<'a>(state: &'a State) -> Element<'a, Message> {
 /// An elevated Pravera on a machine with no monitor installs the driver and
 /// adds the display by itself. The section also offers both actions explicitly,
 /// for a desktop where a virtual display is wanted anyway. Pressed unelevated
-/// they report "run once as administrator" instead of a driver-store code.
+/// they ask Windows for administrator rights and wait for the answer.
 fn displays_blocks<'a>(state: &'a State, unattended: &Unattended) -> Vec<Element<'a, Message>> {
     let backend = unattended.capture_backend.clone();
     let backend_pill = || -> Element<'a, Message> { components::pill(backend.clone(), Tone::Outline) };
@@ -981,7 +1035,7 @@ fn displays_blocks<'a>(state: &'a State, unattended: &Unattended) -> Vec<Element
     } else if headless && !elevated {
         (
             t::WARNING,
-            "No monitor is attached, so there is nothing to share yet. Pravera adds its virtual display by itself when it runs elevated: install the Pravera service, or run pravera.exe once as administrator. Hosting refuses until then.",
+            "No monitor is attached, so there is nothing to share yet. Add the virtual display below and Windows will ask for permission once. Hosting refuses until then.",
         )
     } else if headless {
         (
@@ -1010,14 +1064,26 @@ fn displays_blocks<'a>(state: &'a State, unattended: &Unattended) -> Vec<Element
         any = true;
         controls = controls.push(hovered(
             SLOT_INSTALL_DRIVER,
-            components::small_button(Some(icon::DOWNLOAD), "Install driver", Some(Message::InstallDriver)),
+            components::small_button(
+                Some(icon::DOWNLOAD),
+                "Install driver",
+                (!unattended.elevating).then_some(Message::InstallDriver),
+            ),
         ));
     }
     if status.is_some() && !active {
         any = true;
         controls = controls.push(hovered(
             SLOT_ADD_DISPLAY,
-            components::small_button(Some(icon::PLUS), "Add 1920×1080 display", Some(Message::AddVirtualDisplay)),
+            components::small_button(
+                Some(icon::PLUS),
+                if unattended.elevating {
+                    "Waiting for permission…"
+                } else {
+                    "Add 1920×1080 display"
+                },
+                (!unattended.elevating).then_some(Message::AddVirtualDisplay),
+            ),
         ));
     }
     if any {
@@ -1026,7 +1092,7 @@ fn displays_blocks<'a>(state: &'a State, unattended: &Unattended) -> Vec<Element
             vec![setting(
                 "Add one",
                 if !elevated && !headless {
-                    "A display that exists without a monitor. These need an elevated launch: right-click pravera.exe, then Run as administrator."
+                    "A display that exists without a monitor. Windows asks for permission first, because installing a display driver needs administrator rights."
                 } else {
                     "A display that exists without a monitor, for hosting a machine that has none."
                 },
@@ -1062,10 +1128,10 @@ fn unattended_blocks<'a>(state: &'a State, unattended: &Unattended, now: Instant
     let mut blocks = vec![group(
         "Startup",
         vec![
-            boot_row(&unattended.service),
+            boot_row(&unattended.service, unattended.boot_pending, unattended.elevating),
             components::switch_row(
                 "Start Pravera when I sign in",
-                "Registered under your own account, and visible in Task Manager's Startup tab.",
+                "Registered under your own account as a task named Pravera, which Task Scheduler lists and can remove.",
                 state.switch_travel(SLOT_AT_SIGN_IN, unattended.at_sign_in, now),
                 state.hover.amount(SLOT_AT_SIGN_IN, now),
                 Message::ToggleAtSignIn,
@@ -1094,8 +1160,7 @@ fn unattended_blocks<'a>(state: &'a State, unattended: &Unattended, now: Instant
             icon::ALERT,
             "This starts at sign-in, not at boot: a machine sitting at the sign-in screen after a \
              reboot is not running Pravera and cannot be reached. For a machine with no keyboard, \
-             run Pravera once as administrator and it registers the service above, which starts \
-             at boot instead.",
+             use Start at boot above, which starts Pravera before anybody signs in.",
             Tone::Warning,
         ));
     }
@@ -1108,8 +1173,25 @@ fn unattended_blocks<'a>(state: &'a State, unattended: &Unattended, now: Instant
         ));
     }
 
+    match state.startup() {
+        Some(Startup::Error(words)) => blocks.push(startup_notice(icon::ALERT, words, Tone::Danger)),
+        Some(Startup::Note(words)) => blocks.push(startup_notice(icon::ALERT, words, Tone::Warning)),
+        None => {}
+    }
+
     blocks.push(components::note(closing));
     blocks
+}
+
+/// A note or an error under the Startup rows, with a way to put it away.
+fn startup_notice<'a>(glyph: &'static str, words: &'a str, tone: Tone) -> Element<'a, Message> {
+    row![
+        components::callout(glyph, words, tone),
+        components::small_button(None, "Dismiss", Some(Message::DismissStartupNote)),
+    ]
+    .spacing(t::SPACE_2)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// Which version this is, and whether a newer one is on its way.
@@ -1208,42 +1290,71 @@ fn machine_blocks<'a>(state: &'a State, device_id: Option<DeviceId>) -> Vec<Elem
     ]
 }
 
-/// Whether this machine comes back at boot, stated rather than implied.
+/// Whether this machine comes back at boot, and the one control that changes it.
 ///
-/// A fact, not a control, so it is drawn as one: the same dot-and-sentence the
-/// hosting section uses for a state nobody sets directly. Registering the
-/// service happens by itself when Pravera runs elevated, and the only thing
-/// anybody can do about it from here is run Pravera as administrator once,
-/// which is what the second line says when that is the answer.
-fn boot_row<'a>(service: &Service) -> Element<'a, Message> {
-    let (tint, headline, detail) = match service {
+/// The state is drawn as the dot-and-sentence the hosting section uses for
+/// something nobody sets directly, with a button on the end, because changing
+/// it is not a switch: it asks Windows for administrator rights, and the
+/// answer can be no. So the button says what it does, shows that it is waiting
+/// while the prompt is open, and the row is only redrawn from what the service
+/// manager says afterwards.
+fn boot_row<'a>(service: &Service, pending: bool, elevating: bool) -> Element<'a, Message> {
+    let button = |glyph: Option<&'static str>, words: &'static str| -> Option<Element<'a, Message>> {
+        Some(if pending {
+            components::small_button(glyph, "Waiting for permission…", None)
+        } else {
+            components::small_button(
+                glyph,
+                words,
+                (!elevating).then_some(Message::ToggleBootService),
+            )
+        })
+    };
+
+    let (tint, headline, detail, trailing) = match service {
         Service::Installed => (
             t::SUCCESS,
             "Starts at boot",
             "Windows starts Pravera before anybody signs in, and again after every sign-out. \
-             Moving this file is fine; it repoints the service at wherever it now is."
+             Moving this file is fine; the next start repoints the service at wherever it now is."
                 .to_string(),
+            button(None, "Stop starting at boot"),
         ),
-        Service::NeedsElevation => (
+        Service::NotRegistered => (
             t::ROUTE_OFFLINE,
             "Does not start at boot",
-            "Registering the boot service needs an elevated Pravera. Run this file once as \
-             administrator and it registers itself; nothing else changes."
+            "Windows asks for permission first, because registering a service needs administrator \
+             rights. Nothing else changes."
                 .to_string(),
+            button(Some(icon::BOLT), "Start at boot"),
+        ),
+        Service::Elsewhere => (
+            t::WARNING,
+            "Starts at boot, but another copy",
+            "The boot service runs a different Pravera than this one, so a reboot would not \
+             start this file. Windows asks for permission before it is pointed here."
+                .to_string(),
+            button(Some(icon::BOLT), "Use this copy"),
         ),
         // The one case that shows Windows' own wording. Everything else here
         // is a sentence Pravera chose; this is a sentence Windows chose, and
         // paraphrasing it would throw away the only clue there is.
-        Service::Refused(reason) => (t::DESTRUCTIVE, "Could not start at boot", reason.clone()),
+        Service::Refused(reason) => (
+            t::DESTRUCTIVE,
+            "Could not start at boot",
+            reason.clone(),
+            button(Some(icon::REFRESH), "Try again"),
+        ),
         Service::Unavailable => (
             t::ROUTE_OFFLINE,
             "Does not start at boot",
             "There is no Windows service on this platform. Starting at boot is a systemd unit, \
              installed by a package rather than by Pravera."
                 .to_string(),
+            None,
         ),
     };
-    state_row(tint, headline, detail, None)
+    state_row(tint, headline, detail, trailing)
 }
 
 /// What each role can do, chosen from tiles that say so.
@@ -1631,5 +1742,104 @@ mod tests {
             state.error.as_deref(),
             Some("Could not open a network endpoint.")
         );
+    }
+
+    // -------------------------------------------- the Startup rows, headless
+
+    use crate::headless::Screen;
+    use iced::{Point, Rectangle, Size};
+
+    fn unattended(service: Service, boot_pending: bool, elevating: bool) -> Unattended {
+        Unattended {
+            at_sign_in: false,
+            host_at_launch: false,
+            tray: true,
+            displays: Some(1),
+            virtual_display: None,
+            capture_backend: "dxgi".to_string(),
+            service,
+            boot_pending,
+            elevating,
+        }
+    }
+
+    fn updates() -> Updates {
+        Updates {
+            headline: "Up to date".into(),
+            detail: String::new(),
+            action: UpdateAction::Check,
+            auto: true,
+            enabled: true,
+            pending: false,
+            brief: "Up to date".into(),
+        }
+    }
+
+    /// What clicking across the Startup section publishes, by message.
+    fn clicked_across_startup(
+        state: &State,
+        unattended: &Unattended,
+    ) -> std::collections::BTreeMap<String, usize> {
+        let now = state.arrived + std::time::Duration::from_secs(5);
+        let mut screen = Screen::new(view(state, None, None, unattended, &updates(), now), Size::new(1100.0, 800.0));
+        let mut seen = std::collections::BTreeMap::new();
+        for (_, published) in screen.sweep(Rectangle::new(Point::new(0.0, 0.0), Size::new(1100.0, 800.0)), 6.0) {
+            for message in published {
+                *seen.entry(format!("{message:?}")).or_insert(0) += 1;
+            }
+        }
+        seen
+    }
+
+    fn on_startup() -> State {
+        let mut state = State::default();
+        state.select(Section::Unattended, state.arrived);
+        state
+    }
+
+    #[test]
+    fn a_machine_that_is_not_registered_offers_a_button_that_registers_it() {
+        let seen = clicked_across_startup(&on_startup(), &unattended(Service::NotRegistered, false, false));
+        assert!(seen.get("ToggleBootService").copied().unwrap_or(0) > 0, "{seen:?}");
+        assert!(seen.get("ToggleAtSignIn").copied().unwrap_or(0) > 0, "{seen:?}");
+    }
+
+    #[test]
+    fn a_registered_machine_offers_the_same_button_to_remove_it() {
+        let seen = clicked_across_startup(&on_startup(), &unattended(Service::Installed, false, false));
+        assert!(seen.get("ToggleBootService").copied().unwrap_or(0) > 0, "{seen:?}");
+    }
+
+    #[test]
+    fn a_service_for_another_copy_offers_to_point_it_here() {
+        let seen = clicked_across_startup(&on_startup(), &unattended(Service::Elsewhere, false, false));
+        assert!(seen.get("ToggleBootService").copied().unwrap_or(0) > 0, "{seen:?}");
+    }
+
+    #[test]
+    fn while_windows_is_asking_the_button_waits_and_cannot_be_pressed_again() {
+        let seen = clicked_across_startup(&on_startup(), &unattended(Service::NotRegistered, true, true));
+        assert_eq!(seen.get("ToggleBootService"), None, "{seen:?}");
+    }
+
+    #[test]
+    fn a_failure_under_the_startup_rows_can_be_seen_and_put_away() {
+        let mut state = on_startup();
+        state.startup_error("Windows would not remove the sign-in entry.".into());
+        let seen = clicked_across_startup(&state, &unattended(Service::NotRegistered, false, false));
+        assert!(seen.get("DismissStartupNote").copied().unwrap_or(0) > 0, "{seen:?}");
+
+        assert!(update(&mut state, Message::DismissStartupNote, Instant::now()).is_none());
+        assert_eq!(state.startup(), None);
+    }
+
+    #[test]
+    fn a_failed_sign_in_switch_does_not_borrow_the_hosting_error() {
+        // The bug: the reason went into the field the Hosting page draws, so a
+        // switch on another page failed with no sign of it anywhere.
+        let mut state = on_startup();
+        state.startup_error("no".into());
+        assert_eq!(state.error, None);
+        assert!(matches!(state.startup(), Some(Startup::Error(_))));
     }
 }

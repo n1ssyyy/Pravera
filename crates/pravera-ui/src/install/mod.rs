@@ -101,6 +101,12 @@ pub struct Cli {
     /// `--updated`: this start follows an update, so wait for the build it
     /// replaced to let go before claiming to be the only Pravera.
     pub updated: bool,
+    /// One of the administrator jobs (`--register-service` and friends): do
+    /// only that, with no window and no second application, and exit. See
+    /// [`crate::elevate`].
+    pub job: Option<crate::elevate::Job>,
+    /// `--result PATH`: where a job writes the sentence describing its outcome.
+    pub result: Option<PathBuf>,
 }
 
 impl Cli {
@@ -123,6 +129,10 @@ impl Cli {
                 "--purge" => cli.purge = true,
                 "--updated" => cli.updated = true,
                 "--dir" => cli.dir = args.next().map(PathBuf::from),
+                "--result" => cli.result = args.next().map(PathBuf::from),
+                flag if crate::elevate::Job::from_flag(flag).is_some() => {
+                    cli.job = crate::elevate::Job::from_flag(flag);
+                }
                 "--export-icon" => {
                     let path = args.next().map(PathBuf::from);
                     let size = args
@@ -146,6 +156,8 @@ pub enum Launch {
     ExportIcon(PathBuf, u32),
     /// Install or uninstall with no window, and exit with the outcome.
     Quiet,
+    /// One administrator job, then exit. Never an application.
+    Job(crate::elevate::Job),
     /// The installer window.
     Setup,
     App,
@@ -160,6 +172,12 @@ pub fn launch(cli: &Cli) -> Launch {
     }
     if cli.quiet && (cli.install || cli.uninstall) {
         return Launch::Quiet;
+    }
+    // Before the installer test: a job is started by the running application
+    // from the installed file, and must never be taken for the installer
+    // because of what that file is called.
+    if let Some(job) = cli.job {
+        return Launch::Job(job);
     }
     if cli.setup || cli.install || cli.uninstall || named_setup() {
         return Launch::Setup;
@@ -806,6 +824,21 @@ mod tests {
         // The service's and agent's own flags are not the installer's business.
         let cli = args(&["--agent", "--hidden"]);
         assert_eq!(cli, Cli::default());
+    }
+
+    #[test]
+    fn an_administrator_job_is_never_the_app_and_never_the_installer() {
+        // The elevated copy is started with the `runas` verb from the running
+        // application, with one of these flags and a result file. It must come
+        // out as exactly that job: not the app (which would hand it to the
+        // running instance and exit, the very thing that made "launch as
+        // administrator" do nothing), and not the installer.
+        for job in crate::elevate::Job::ALL {
+            let cli = args(&[job.flag(), "--result", r"C:\Users\a b\Temp\r.txt"]);
+            assert_eq!(launch(&cli), Launch::Job(job), "{job:?}");
+            assert_eq!(cli.result, Some(PathBuf::from(r"C:\Users\a b\Temp\r.txt")));
+            assert!(!cli.setup && !cli.install && !cli.uninstall);
+        }
     }
 
     #[test]

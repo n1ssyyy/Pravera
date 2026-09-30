@@ -134,6 +134,32 @@ pub fn ensure_installed() -> Installed {
     }
 }
 
+/// What the service manager says, asked without changing anything.
+///
+/// Opening the manager and the service for a query needs no elevation, so an
+/// ordinary Pravera gets a true answer. [`ensure_installed`] cannot give one:
+/// it opens everything for writing, which an unelevated process is refused,
+/// and it reports that refusal as "not elevated" even when the service is
+/// registered and correct.
+pub fn current() -> Installed {
+    let Ok(wanted) = command_line() else {
+        return Installed::Refused("Pravera could not find its own executable.".into());
+    };
+    let Ok(manager) = manager(SC_MANAGER_CONNECT) else {
+        return Installed::Refused("Pravera could not ask the service manager.".into());
+    };
+    let Ok(handle) = service(
+        &manager,
+        SERVICE_QUERY_STATUS | windows::Win32::System::Services::SERVICE_QUERY_CONFIG,
+    ) else {
+        return Installed::NotRegistered;
+    };
+    match registered_command(&handle) {
+        Some(command) if command.eq_ignore_ascii_case(&wanted) => Installed::Unchanged,
+        _ => Installed::Elsewhere,
+    }
+}
+
 /// The command line the service is currently registered with.
 fn registered_command(handle: &Handle) -> Option<String> {
     // Asked for its size first: the config is a variable-length structure with

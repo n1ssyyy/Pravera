@@ -276,4 +276,59 @@ mod tests {
         assert!(!state.is_animating(now + MICRO));
         assert_eq!(state.amount(now + MICRO), 1.0);
     }
+
+    // ----------------------------------------------- what it does to a click
+
+    use crate::headless::{arrive, click, press_and_release, Screen};
+    use iced::{Point, Rectangle, Size};
+
+    fn small_button() -> Element<'static, &'static str> {
+        crate::components::small_button(None, "Press me", Some("pressed"))
+    }
+
+    #[test]
+    fn a_press_and_release_over_a_glided_button_publishes_its_message_exactly_once() {
+        let mut screen = Screen::new(small_button(), Size::new(300.0, 100.0));
+        assert_eq!(screen.feed(click(Point::new(20.0, 12.0))), vec!["pressed"]);
+    }
+
+    #[test]
+    fn the_first_click_is_a_click_not_a_hover() {
+        // A press with no pointer movement before it, as a touch screen or a
+        // remote-controlled pointer gives: the wrapper must not need to have
+        // seen the pointer arrive before the button under it will fire.
+        let mut screen = Screen::new(small_button(), Size::new(300.0, 100.0));
+        assert_eq!(
+            screen.feed(press_and_release(Point::new(20.0, 12.0))),
+            vec!["pressed"]
+        );
+    }
+
+    #[test]
+    fn hovering_first_and_then_clicking_publishes_once_and_never_twice() {
+        let mut screen = Screen::new(small_button(), Size::new(300.0, 100.0));
+        let at = Point::new(20.0, 12.0);
+        let mut published = screen.feed(arrive(at));
+        published.extend(screen.feed(press_and_release(at)));
+        published.extend(screen.feed(press_and_release(at)));
+        assert_eq!(published, vec!["pressed", "pressed"]);
+    }
+
+    #[test]
+    fn pressing_off_the_button_publishes_nothing() {
+        let mut screen = Screen::new(small_button(), Size::new(300.0, 100.0));
+        assert!(screen.feed(click(Point::new(250.0, 90.0))).is_empty());
+    }
+
+    #[test]
+    fn every_point_of_the_button_answers_and_no_point_answers_twice() {
+        let mut screen = Screen::new(small_button(), Size::new(300.0, 100.0));
+        let clicks = screen.sweep(Rectangle::new(Point::new(0.0, 0.0), Size::new(300.0, 100.0)), 2.0);
+        let mut answering = 0;
+        for (at, published) in &clicks {
+            assert!(published.len() <= 1, "{at:?} published {published:?}");
+            answering += published.len();
+        }
+        assert!(answering > 50, "the button answered only {answering} points");
+    }
 }

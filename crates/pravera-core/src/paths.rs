@@ -21,6 +21,31 @@ pub fn data_dir() -> Result<PathBuf> {
     Ok(dirs()?.data_dir().to_path_buf())
 }
 
+/// Where the log may be written, best place first.
+///
+/// The per-user data folder is where somebody looks, and it is not always
+/// where a process can write: a redirected profile, a folder a security product
+/// guards, a file held open by another program. The local (non-roaming)
+/// application folder and the temp folder come after it, so a run that cannot
+/// write its usual log still leaves one, and the log itself says which
+/// locations were refused.
+pub fn log_candidates(file_name: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut add = |path: PathBuf| {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
+    if let Ok(dir) = data_dir() {
+        add(dir.join(file_name));
+    }
+    if let Ok(dirs) = dirs() {
+        add(dirs.cache_dir().join(file_name));
+    }
+    add(std::env::temp_dir().join("Pravera").join(file_name));
+    paths
+}
+
 /// Machine-wide state owned by the privileged service: the device identity key
 /// and the user database.
 ///

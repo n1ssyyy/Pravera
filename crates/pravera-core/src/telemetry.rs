@@ -61,51 +61,76 @@ pub fn init(default_filter: &str) {
 /// log that grows without bound is a log nobody dares open, and a log that is
 /// truncated on start loses exactly the run that crashed.
 pub fn init_to_file(default_filter: &str, path: &std::path::Path) -> Option<std::path::PathBuf> {
+    init_to_first(default_filter, &[path.to_path_buf()])
+}
+
+/// [`init_to_file`], trying each of `paths` in turn until one can be opened.
+///
+/// A log that cannot be opened is a log that says nothing about why, and the
+/// place it cannot be opened is usually the place somebody looked: a profile
+/// on a redirected drive, a folder a security product guards, a file another
+/// process holds. Falling back to the next candidate means a run that could
+/// not write its usual log still leaves one somewhere, and the reasons the
+/// earlier candidates failed are the first lines of it, so the log itself says
+/// where the log should have been.
+///
+/// Returns the file being written, or `None` when none could be opened and the
+/// log went to standard output.
+pub fn init_to_first(
+    default_filter: &str,
+    paths: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
     use std::fs;
 
-    let opened = (|| -> std::io::Result<fs::File> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        // A failed rename is not a reason to give up the log: the common cause
-        // is a second copy of the app already holding the previous file open.
-        let _ = fs::rename(path, path.with_extension("log.1"));
-        fs::File::create(path)
-    })();
-
-    match opened {
-        Ok(file) => {
-            let res = tracing_subscriber::fmt()
-                .with_env_filter(filter(default_filter))
-                .with_target(true)
-                // No escape codes: this is read in a text editor, and a file
-                // full of `\u{1b}[2m` is worse than no colour.
-                .with_ansi(false)
-                .with_writer(std::sync::Arc::new(file))
-                .try_init();
-            if res.is_err() {
-                // `try_init` fails when a global subscriber is already set.
-                // Callers run this before the single-instance check, so this
-                // is a second instance about to `exit(7)`: it already renamed
-                // the live log aside and truncated a fresh file. Remove the
-                // truncation and report `None` so the caller knows logging
-                // went nowhere — returning `Some` here made the caller believe
-                // "logging to file" while nothing would ever be written.
-                let _ = std::fs::remove_file(path);
-                return None;
+    let mut failures: Vec<String> = Vec::new();
+    for path in paths {
+        let opened = (|| -> std::io::Result<fs::File> {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
             }
-            Some(path.to_path_buf())
+            // A failed rename is not a reason to give up the log: the common
+            // cause is a second copy of the app already holding the previous
+            // file open.
+            let _ = fs::rename(path, path.with_extension("log.1"));
+            fs::File::create(path)
+        })();
+
+        let file = match opened {
+            Ok(file) => file,
+            Err(error) => {
+                failures.push(format!("{}: {error}", path.display()));
+                continue;
+            }
+        };
+
+        let res = tracing_subscriber::fmt()
+            .with_env_filter(filter(default_filter))
+            .with_target(true)
+            // No escape codes: this is read in a text editor, and a file
+            // full of `\u{1b}[2m` is worse than no colour.
+            .with_ansi(false)
+            .with_writer(std::sync::Arc::new(file))
+            .try_init();
+        if res.is_err() {
+            // `try_init` fails when a global subscriber is already set. Remove
+            // the truncation and report `None` so the caller knows logging
+            // went nowhere: returning `Some` here would make the caller
+            // believe "logging to file" while nothing would ever be written.
+            let _ = fs::remove_file(path);
+            return None;
         }
-        Err(error) => {
-            init(default_filter);
-            tracing::warn!(
-                path = %path.display(),
-                %error,
-                "could not open a log file; logging to standard output"
-            );
-            None
+
+        for failure in &failures {
+            tracing::warn!(%failure, "a log location could not be used");
         }
+        return Some(path.clone());
     }
+
+    init(default_filter);
+    for failure in &failures {
+        tracing::warn!(%failure, "a log location could not be used; logging to standard output");
+    }
+    None
 }
 
 fn filter(default_filter: &str) -> tracing_subscriber::EnvFilter {
@@ -217,5 +242,33 @@ mod log_tests {
         // name in another script must not be cut mid-character.
         assert_eq!(for_log("Ünïcödé Machine"), "Ünïcödé Machine");
         assert_eq!(for_log(""), "");
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+
+    #[test]
+    fn a_location_that_cannot_be_opened_falls_through_to_the_next() {
+        let dir = std::env::temp_dir().join(format!("pravera-log-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A regular file where the log's folder should be: creating the folder
+        // and the file both refuse.
+        let not_a_folder = dir.join("not-a-folder");
+        std::fs::write(&not_a_folder, b"x").unwrap();
+        let blocked = not_a_folder.join("pravera.log");
+        let usable = dir.join("usable.log");
+
+        // The global subscriber can only be set once per process, so this
+        // test is the only one in the crate that sets it.
+        let used = init_to_first("info", &[blocked, usable.clone()]);
+        assert_eq!(used, Some(usable.clone()));
+        tracing::info!("hello from the fallback");
+        let written = std::fs::read_to_string(&usable).unwrap();
+        assert!(written.contains("hello from the fallback"), "{written}");
+        assert!(written.contains("could not be used"), "{written}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -39,6 +39,7 @@
 pub mod autostart;
 pub mod backdrop;
 pub mod chrome;
+pub mod elevate;
 pub mod single_instance;
 pub mod components;
 pub mod icon;
@@ -54,6 +55,8 @@ pub mod widget;
 
 mod setup;
 mod shot;
+#[cfg(test)]
+mod headless;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -166,6 +169,11 @@ pub fn run() -> iced::Result {
         install::Launch::Quiet => {
             attach_console();
             std::process::exit(install::run_quiet(&cli));
+        }
+        // An administrator job: no window, no single-instance port, no log
+        // rotation. The application that asked is running and owns all three.
+        install::Launch::Job(job) => {
+            std::process::exit(elevate::perform(job, cli.result.as_deref()));
         }
         install::Launch::Setup => {
             // Removing the copy this process is running from: hand the job
@@ -332,14 +340,31 @@ fn start_logging() {
         return;
     }
 
-    match pravera_core::paths::data_dir() {
-        Ok(dir) => {
-            pravera_core::telemetry::init_to_file(LOG_FILTER, &dir.join("pravera.log"));
-        }
-        // Nowhere to write. Installing the terminal subscriber anyway costs
-        // nothing and means a build run from a console still says something.
-        Err(_) => pravera_core::telemetry::init(LOG_FILTER),
-    }
+    // The first place that can be written. A release build has no console, so
+    // a log that cannot be opened is a run that says nothing about anything,
+    // and the last time that happened it was found out weeks later.
+    let written = pravera_core::telemetry::init_to_first(
+        LOG_FILTER,
+        &pravera_core::paths::log_candidates("pravera.log"),
+    );
+
+    // A line that says this run began, and where it is being written, so a log
+    // that is there but stale is told apart from one that was never started.
+    tracing::info!(
+        version = install::VERSION,
+        pid = std::process::id(),
+        exe = ?std::env::current_exe().ok(),
+        log = ?written,
+        "Pravera started"
+    );
+
+    // A panic in a release build is a window that closes with no explanation.
+    // Put it in the log first.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(%info, "Pravera panicked");
+        previous(info);
+    }));
 }
 
 /// A named function rather than a closure: `.theme` needs a callable valid for
@@ -509,10 +534,9 @@ pub enum Message {
     /// A background look at this machine's screens finished, having added the
     /// virtual display if the machine had none.
     DisplaysChecked(Box<DisplayCheck>),
-    /// The Settings button asked for a virtual display, and this is how it went.
-    DisplayAutoAdded(Result<String, String>),
-    /// The Settings button asked for the driver to be staged.
-    DriverInstalled(Result<Option<String>, String>),
+    /// An administrator job the person asked for in Settings has finished, or
+    /// its prompt was declined. See [`elevate`].
+    Elevated(elevate::Job, elevate::Outcome),
     /// What the service registration came to, checked off the UI thread.
     ServiceChecked(pravera_service::Installed),
     /// Whether the sign-in task is registered, read off the UI thread: the
@@ -931,6 +955,13 @@ struct Pravera {
     /// Registered to start at sign-in. Read in the background at startup and
     /// after every change, never guessed.
     at_sign_in: bool,
+    /// The sign-in entry is being changed. A second press while `schtasks` is
+    /// still running would start a second one against the same task.
+    at_sign_in_busy: bool,
+    /// The administrator job that is running, if one is: Windows is showing a
+    /// prompt, or the elevated copy is at work. One at a time, because two
+    /// prompts at once are not a question anybody can answer.
+    elevated_job: Option<elevate::Job>,
     /// How many displays this machine reports; `None` until the probe answers.
     displays: Option<usize>,
     /// The virtual display's state from the last background check; `None`
@@ -1149,7 +1180,7 @@ impl Pravera {
             // focused, and no event is sent to say so.
             focused: true,
             // Replaced by the real answer from the startup task.
-            service: pravera_service::Installed::NotElevated,
+            service: pravera_service::Installed::NotRegistered,
             scanning: true,
             now,
             endpoint: None,
@@ -1198,6 +1229,8 @@ impl Pravera {
             known,
             known_path,
             at_sign_in: false,
+            at_sign_in_busy: false,
+            elevated_job: None,
             displays: None,
             virtual_display: None,
             capture_backend: "checking…".to_string(),
@@ -1458,36 +1491,7 @@ impl Pravera {
                 }
                 Task::none()
             }
-            Message::DriverInstalled(result) => {
-                match result {
-                    Ok(Some(_)) => self
-                        .settings
-                        .virtual_result("The virtual display driver is installed.".to_string()),
-                    Ok(None) => self.settings.virtual_result(
-                        "The virtual display driver was already installed.".to_string(),
-                    ),
-                    Err(output) => {
-                        tracing::warn!(%output, "driver install failed");
-                        self.settings.virtual_result(output);
-                    }
-                }
-                self.check_displays()
-            }
-            Message::DisplayAutoAdded(result) => {
-                let hosting = match result {
-                    Ok(shown) => {
-                        self.display_failure = None;
-                        self.settings.virtual_result(shown);
-                        self.host_once_screen_exists()
-                    }
-                    Err(reason) => {
-                        self.settings.virtual_result(reason);
-                        Task::none()
-                    }
-                };
-                // Refresh the card from what is really there now.
-                Task::batch([hosting, self.check_displays()])
-            }
+            Message::Elevated(job, outcome) => self.elevated_finished(job, outcome),
             Message::ServiceChecked(installed) => {
                 match &installed {
                     pravera_service::Installed::Registered => {
@@ -1499,7 +1503,7 @@ impl Pravera {
                     pravera_service::Installed::Refused(reason) => {
                         tracing::warn!(%reason, "the Pravera service could not be registered");
                     }
-                    // Nothing to say. Not elevated is the ordinary case on a
+                    // Nothing to say. Not registered is the ordinary case on a
                     // machine nobody has asked to run unattended, and
                     // unchanged is every run after the first.
                     _ => {}
@@ -1508,9 +1512,17 @@ impl Pravera {
                 Task::none()
             }
             Message::AtSignIn(result) => {
+                self.at_sign_in_busy = false;
                 match result {
                     Ok(enabled) => self.at_sign_in = enabled,
-                    Err(reason) => self.settings.failed(reason),
+                    // Shown under the Startup rows, where the switch is. This
+                    // used to go to `settings.failed`, whose text is drawn only
+                    // on the Hosting page, so a switch that could not turn on
+                    // did so without a word anywhere a person was looking.
+                    Err(reason) => {
+                        tracing::warn!(%reason, "the sign-in entry was not changed");
+                        self.settings.startup_error(reason);
+                    }
                 }
                 Task::none()
             }
@@ -2183,6 +2195,9 @@ impl Pravera {
         // grid keeps filling, so switching back is a jump rather than a wait.
         self.drain_terminals();
         let mut ended: Vec<(usize, Ending)> = Vec::new();
+        // What the sessions had to say that a person should read. Posted after
+        // the walk: a notice touches the whole application, not one tab.
+        let mut notices: Vec<Notice> = Vec::new();
         // Terminals opened by a session's own driver land here first and join
         // the tabs after the walk, for the same index-invalidating reason.
         let mut opened: Vec<(
@@ -2197,8 +2212,40 @@ impl Pravera {
             while let Ok(event) = live.events.try_recv() {
                 match event {
                     link::Event::Reconfigured { config, video } => {
+                        let profile = config.profile;
                         live.link.adopt(*config, video);
                         live.state.reconfigured(self.now);
+                        // The tile has already moved to what was asked for. If
+                        // the host settled on something else, it slides to the
+                        // real one, and the person is told.
+                        if live.state.answered(profile) {
+                            notices.push(quality_notice(
+                                live.link.host_name(),
+                                format!("chose {} instead", screens::session::profile_label(profile)),
+                            ));
+                        }
+                    }
+                    link::Event::Refused(change, reason) => {
+                        tracing::warn!(%reason, ?change, "the host declined a change to the stream");
+                        if change == link::Change::Profile {
+                            live.state.declined();
+                        }
+                        notices.push(Notice {
+                            message: format!(
+                                "{} would not change the {}. {reason}",
+                                live.link.host_name(),
+                                match change {
+                                    link::Change::Profile => "quality profile",
+                                    link::Change::Display => "display",
+                                }
+                            ),
+                            failure: true,
+                            until: None,
+                        });
+                    }
+                    link::Event::Sas(outcome) => {
+                        live.state.sas_finished();
+                        notices.push(sas_notice(live.link.host_name(), &outcome, self.now));
                     }
                     link::Event::Latency(rtt) => live.state.measured(rtt),
                     // A shell opened from inside this session: same machine,
@@ -2217,6 +2264,10 @@ impl Pravera {
                     }
                 }
             }
+        }
+
+        for notice in notices {
+            self.post(notice);
         }
 
         // The tab in front feeds the picture and the keyframe ask. Background
@@ -3200,6 +3251,11 @@ impl Pravera {
             },
             screens::settings::Message::ToggleHosting => self.toggle_hosting(),
             screens::settings::Message::ToggleAtSignIn => {
+                if self.at_sign_in_busy {
+                    return Task::none();
+                }
+                self.at_sign_in_busy = true;
+                self.settings.clear_startup();
                 let wanted = !self.at_sign_in;
                 // Re-read rather than assumed: the task scheduler is the
                 // truth, and a switch that shows what was asked for instead
@@ -3230,42 +3286,139 @@ impl Pravera {
             }
             screens::settings::Message::CheckForUpdates => self.check_for_update(),
             screens::settings::Message::RestartToUpdate => self.apply_update(true),
+            screens::settings::Message::ToggleBootService => {
+                self.settings.clear_startup();
+                let job = if self.service.is_installed() {
+                    elevate::Job::UnregisterService
+                } else {
+                    elevate::Job::RegisterService
+                };
+                self.run_elevated(job)
+            }
+            screens::settings::Message::DismissStartupNote => {
+                self.settings.clear_startup();
+                Task::none()
+            }
             screens::settings::Message::AddVirtualDisplay => {
                 // Asked for by a person, so it is added beside real monitors
                 // too, and a recent automatic failure does not stand in for
-                // trying. Unelevated it reports the one elevated run needed.
-                // Off the UI thread: a first install waits for the monitor.
-                self.settings
-                    .virtual_result("Adding the virtual display…".to_string());
-                Task::perform(
-                    async {
-                        tokio::task::spawn_blocking(|| {
-                            pravera_capture::add_virtual_display(1920, 1080, 60)
-                                .map(|shown| {
-                                    format!(
-                                        "Added the virtual display ({}x{}). Hosting captures it like any monitor.",
-                                        shown.resolution.width, shown.resolution.height
-                                    )
-                                })
-                                .map_err(|error| error.to_string())
-                        })
-                        .await
-                        .unwrap_or_else(|error| Err(format!("adding the display failed: {error}")))
-                    },
-                    Message::DisplayAutoAdded,
-                )
+                // trying. Windows is asked for administrator rights, and a
+                // first install waits for the monitor: off the UI thread.
+                if self.elevated_job.is_some() {
+                    return Task::none();
+                }
+                self.settings.virtual_result(
+                    "Waiting for permission. Windows asks first, because adding a display \
+                     needs administrator rights."
+                        .to_string(),
+                );
+                self.run_elevated(elevate::Job::AddDisplay)
             }
             screens::settings::Message::InstallDriver => {
-                Task::perform(
-                    async {
-                        tokio::task::spawn_blocking(pravera_capture::try_auto_install)
-                            .await
-                            .unwrap_or_else(|e| Err(format!("driver install task: {e}")))
-                    },
-                    Message::DriverInstalled,
-                )
+                if self.elevated_job.is_some() {
+                    return Task::none();
+                }
+                self.settings.virtual_result(
+                    "Waiting for permission. Windows asks first, because installing a display \
+                     driver needs administrator rights."
+                        .to_string(),
+                );
+                self.run_elevated(elevate::Job::InstallDriver)
             }
             _ => Task::none(),
+        }
+    }
+
+    /// Start an administrator job and wait for it off the interface thread.
+    ///
+    /// The window stays responsive while Windows shows its prompt and while the
+    /// elevated copy works; [`Message::Elevated`] arrives when it is over,
+    /// whichever way it ended.
+    fn run_elevated(&mut self, job: elevate::Job) -> Task<Message> {
+        if self.elevated_job.is_some() {
+            return Task::none();
+        }
+        self.elevated_job = Some(job);
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || elevate::request(job))
+                    .await
+                    .unwrap_or_else(|error| {
+                        elevate::Outcome::Failed(format!("the administrator step stopped: {error}"))
+                    })
+            },
+            move |outcome| Message::Elevated(job, outcome),
+        )
+    }
+
+    /// An administrator job ended. What was asked is never assumed to be what
+    /// happened: the row is redrawn from the system's own answer, so a job
+    /// that half worked shows as what it is.
+    fn elevated_finished(&mut self, job: elevate::Job, outcome: elevate::Outcome) -> Task<Message> {
+        use elevate::{Job, Outcome};
+
+        self.elevated_job = None;
+        match &outcome {
+            Outcome::Done(detail) => {
+                tracing::info!(flag = job.flag(), %detail, "the administrator step is done")
+            }
+            Outcome::Declined => {
+                tracing::info!(flag = job.flag(), "the Windows prompt was declined; nothing changed")
+            }
+            Outcome::Failed(reason) => {
+                tracing::warn!(flag = job.flag(), %reason, "the administrator step failed")
+            }
+        }
+
+        match job {
+            Job::RegisterService | Job::UnregisterService => {
+                match outcome {
+                    Outcome::Declined => self.settings.startup_note(
+                        "Permission was not given, so nothing changed.".to_string(),
+                    ),
+                    Outcome::Failed(reason) => self.settings.startup_error(sentence(&reason)),
+                    Outcome::Done(_) => {}
+                }
+                check_service()
+            }
+            Job::AddDisplay => match outcome {
+                Outcome::Done(size) => {
+                    self.display_failure = None;
+                    self.settings.virtual_result(if size.is_empty() {
+                        "Added the virtual display. Hosting captures it like any monitor.".to_string()
+                    } else {
+                        format!(
+                            "Added the virtual display ({size}). Hosting captures it like any monitor."
+                        )
+                    });
+                    Task::batch([self.host_once_screen_exists(), self.check_displays()])
+                }
+                Outcome::Declined => {
+                    self.settings.virtual_result(
+                        "Permission was not given, so no display was added.".to_string(),
+                    );
+                    Task::none()
+                }
+                Outcome::Failed(reason) => {
+                    self.settings.virtual_result(sentence(&reason));
+                    self.check_displays()
+                }
+            },
+            Job::InstallDriver => {
+                match outcome {
+                    Outcome::Done(what) if what == "already installed" => self.settings.virtual_result(
+                        "The virtual display driver was already installed.".to_string(),
+                    ),
+                    Outcome::Done(_) => self
+                        .settings
+                        .virtual_result("The virtual display driver is installed.".to_string()),
+                    Outcome::Declined => self.settings.virtual_result(
+                        "Permission was not given, so the driver was not installed.".to_string(),
+                    ),
+                    Outcome::Failed(reason) => self.settings.virtual_result(sentence(&reason)),
+                }
+                self.check_displays()
+            }
         }
     }
 
@@ -3700,6 +3853,11 @@ impl Pravera {
                     virtual_display: self.virtual_display.clone(),
                     capture_backend: self.capture_backend.clone(),
                     service: self.boot_service(),
+                    boot_pending: matches!(
+                        self.elevated_job,
+                        Some(elevate::Job::RegisterService | elevate::Job::UnregisterService)
+                    ),
+                    elevating: self.elevated_job.is_some(),
                 },
                 &self.update_summary(),
                 now,
@@ -4131,6 +4289,45 @@ fn clipped(words: &str, most: usize) -> String {
     cut
 }
 
+/// The toast for a host that settled on another quality profile than asked.
+fn quality_notice(host: &str, what: String) -> Notice {
+    Notice {
+        message: format!("{host} {what}."),
+        failure: true,
+        until: None,
+    }
+}
+
+/// The toast for the outcome of a request for Ctrl+Alt+Del, naming the machine
+/// it was asked of and, when it did not work, what can be done about it.
+fn sas_notice(host: &str, outcome: &link::SasOutcome, now: Instant) -> Notice {
+    use link::SasOutcome;
+    match outcome {
+        SasOutcome::Sent => Notice {
+            message: format!("Sent Ctrl+Alt+Del to {host}."),
+            failure: false,
+            until: Some(now + NOTICE_FOR),
+        },
+        SasOutcome::Unavailable => Notice {
+            message: format!(
+                "{host} can only send Ctrl+Alt+Del when Pravera starts at boot there.                  Turn it on in its Settings, Unattended."
+            ),
+            failure: true,
+            until: None,
+        },
+        SasOutcome::NotAllowed => Notice {
+            message: format!("This login may not send Ctrl+Alt+Del to {host}."),
+            failure: true,
+            until: None,
+        },
+        SasOutcome::Failed(reason) => Notice {
+            message: format!("Ctrl+Alt+Del did not reach {host}. {reason}"),
+            failure: true,
+            until: None,
+        },
+    }
+}
+
 /// Send the session everything the keyboard hook has taken since the last
 /// call, in the order it was taken.
 fn forward_grabbed(live: &mut Live, now: Instant) {
@@ -4192,14 +4389,19 @@ fn terminal_wakes() -> impl iced::futures::Stream<Item = Message> {
     net::wake::rings().map(|()| Message::TerminalWake)
 }
 
-/// Register the service, or repoint it at this copy, without holding up the
-/// window: the service control manager answers when it answers.
+/// Read what is registered, and repoint an existing registration at this copy
+/// when this process may. It never registers the service: that is the person's
+/// decision, made with the button in Settings, so "Stop starting at boot" is
+/// not undone by the next elevated start. Without holding up the window: the
+/// service control manager answers when it answers.
 fn check_service() -> Task<Message> {
     Task::perform(
         async {
-            tokio::task::spawn_blocking(pravera_service::ensure_installed)
+            tokio::task::spawn_blocking(pravera_service::reconcile)
                 .await
-                .unwrap_or(pravera_service::Installed::NotElevated)
+                .unwrap_or_else(|error| {
+                    pravera_service::Installed::Refused(format!("the service check stopped: {error}"))
+                })
         },
         Message::ServiceChecked,
     )
@@ -4333,7 +4535,8 @@ fn boot_service(installed: &pravera_service::Installed) -> screens::settings::Se
 
     match installed {
         Installed::Registered | Installed::Repointed | Installed::Unchanged => Service::Installed,
-        Installed::NotElevated => Service::NeedsElevation,
+        Installed::NotRegistered | Installed::NotElevated => Service::NotRegistered,
+        Installed::Elsewhere => Service::Elsewhere,
         Installed::Refused(reason) => Service::Refused(reason.clone()),
     }
 }
@@ -4343,12 +4546,37 @@ pub mod tests {
     use super::*;
 
     #[test]
+    fn a_host_that_cannot_send_ctrl_alt_del_says_what_to_do_and_names_itself() {
+        let now = Instant::now();
+        let notice = sas_notice("EVERCORE", &link::SasOutcome::Unavailable, now);
+        assert!(notice.failure);
+        assert!(notice.message.starts_with("EVERCORE"), "{}", notice.message);
+        assert!(notice.message.contains("starts at boot"), "{}", notice.message);
+        assert!(notice.message.contains("Settings, Unattended"), "{}", notice.message);
+        assert!(!notice.message.contains('\u{2014}'), "{}", notice.message);
+        // A failure stays until it is read.
+        assert!(notice.until.is_none());
+    }
+
+    #[test]
+    fn a_sent_ctrl_alt_del_is_a_brief_success_and_a_refusal_is_a_failure() {
+        let now = Instant::now();
+        let sent = sas_notice("EVERCORE", &link::SasOutcome::Sent, now);
+        assert!(!sent.failure && sent.until.is_some());
+        assert!(sent.message.contains("EVERCORE"));
+        assert!(sas_notice("EVERCORE", &link::SasOutcome::NotAllowed, now).failure);
+        assert!(sas_notice("EVERCORE", &link::SasOutcome::Failed("x".into()), now).failure);
+    }
+
+    #[test]
     fn a_machine_that_will_not_come_back_is_never_shown_as_one_that_will() {
         // The whole point of the line in Settings. A machine that stays dark
         // after a reboot must not be described as one that starts at boot,
         // because somebody reads that line and then goes home.
         for state in [
             pravera_service::Installed::NotElevated,
+            pravera_service::Installed::NotRegistered,
+            pravera_service::Installed::Elsewhere,
             pravera_service::Installed::Refused("anything at all".into()),
         ] {
             assert!(!state.is_installed(), "{state:?}");

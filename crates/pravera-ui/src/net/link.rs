@@ -112,8 +112,67 @@ pub enum Event {
     ),
     /// A control round-trip completed. A real measurement, not an estimate.
     Latency(Duration),
+    /// What became of a request for Ctrl+Alt+Del.
+    Sas(SasOutcome),
+    /// The host declined a change to the stream, and the session carries on
+    /// as it was. Not an ending: a refused profile is a refused profile.
+    Refused(Change, String),
     /// The session ended, for whatever reason. Terminal.
     Ended(Ending),
+}
+
+/// What a request for Ctrl+Alt+Del came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SasOutcome {
+    /// The host generated it.
+    Sent,
+    /// The host cannot: it is not running as the service, which is the only
+    /// thing that may generate one.
+    Unavailable,
+    /// This login is not allowed to.
+    NotAllowed,
+    /// Something else went wrong, in words fit to show.
+    Failed(String),
+}
+
+/// Which change of the stream the host declined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    Profile,
+    Display,
+}
+
+/// Read the host's answer to a request for Ctrl+Alt+Del.
+///
+/// The host answers `SasSent` only when it went out, and a refusal when it did
+/// not, so the two are told apart here rather than assumed.
+pub fn sas_outcome(result: Result<(), ClientError>) -> SasOutcome {
+    use pravera_proto::ProtocolError;
+    match result {
+        Ok(()) => SasOutcome::Sent,
+        Err(ClientError::Refused(ProtocolError::Unsupported)) => SasOutcome::Unavailable,
+        Err(ClientError::Refused(ProtocolError::PermissionDenied)) => SasOutcome::NotAllowed,
+        Err(other) => SasOutcome::Failed(describe(other)),
+    }
+}
+
+/// What to tell somebody whose change of the stream was refused.
+pub fn refusal_words(error: &pravera_proto::ProtocolError) -> String {
+    use pravera_proto::ProtocolError;
+    match error {
+        ProtocolError::PermissionDenied => "This login may not change that.".into(),
+        ProtocolError::Unsupported => "That is not on offer there.".into(),
+        ProtocolError::Busy => "The host is busy.".into(),
+        other => sentence_of(&other.to_string()),
+    }
+}
+
+fn sentence_of(words: &str) -> String {
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}.", first.to_uppercase(), chars.as_str().trim_end_matches('.')),
+        None => String::new(),
+    }
 }
 
 /// Why a session stopped.
@@ -696,20 +755,34 @@ async fn apply(
             return None;
         }
         Command::SendSas => {
-            if let Err(error) = client.send_sas().await {
+            let result = client.send_sas().await;
+            if let Err(error) = &result {
                 warn!(%error, "Secure Attention Sequence was not delivered");
             } else {
                 tracing::info!("Secure Attention Sequence sent");
             }
-            return None;
+            // A dead connection is the ping's to notice; this is only the
+            // answer to the one request.
+            let outcome = sas_outcome(result);
+            return events.send(Event::Sas(outcome)).err().map(|_| Ending::Requested);
         }
-        Command::SetProfile(profile) => client.set_profile(profile).await,
-        Command::SelectMonitor(monitor) => client.select_monitor(monitor).await,
+        Command::SetProfile(profile) => (Change::Profile, client.set_profile(profile).await),
+        Command::SelectMonitor(monitor) => (Change::Display, client.select_monitor(monitor).await),
         Command::Disconnect => return Some(Ending::Requested),
     };
 
+    let (change, reconfigured) = reconfigured;
     let config = match reconfigured {
         Ok(config) => config,
+        // The host said no, and the stream is exactly as it was. Ending the
+        // session over a refused profile threw away a working connection.
+        Err(ClientError::Refused(error)) => {
+            warn!(%error, ?change, "the host declined the change");
+            return events
+                .send(Event::Refused(change, refusal_words(&error)))
+                .err()
+                .map(|_| Ending::Requested);
+        }
         Err(error) => return Some(ending_for(error)),
     };
 
@@ -772,6 +845,31 @@ fn describe(error: ClientError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ctrl_alt_del_is_only_shown_as_sent_when_the_host_said_so() {
+        use pravera_proto::ProtocolError;
+        assert_eq!(sas_outcome(Ok(())), SasOutcome::Sent);
+        assert_eq!(
+            sas_outcome(Err(ClientError::Refused(ProtocolError::Unsupported))),
+            SasOutcome::Unavailable
+        );
+        assert_eq!(
+            sas_outcome(Err(ClientError::Refused(ProtocolError::PermissionDenied))),
+            SasOutcome::NotAllowed
+        );
+        assert!(matches!(
+            sas_outcome(Err(ClientError::TooSoon("sending SAS"))),
+            SasOutcome::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn a_refused_change_is_worded_for_a_person() {
+        use pravera_proto::ProtocolError;
+        assert!(refusal_words(&ProtocolError::PermissionDenied).contains("may not"));
+        assert!(refusal_words(&ProtocolError::Malformed).ends_with('.'));
+    }
 
     #[test]
     fn a_refused_password_does_not_hint_at_whether_the_account_exists() {

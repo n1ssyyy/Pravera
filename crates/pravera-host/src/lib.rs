@@ -65,6 +65,15 @@ pub trait SessionHooks {
         let _ = ask;
         ClipboardAnswer::Unavailable
     }
+
+    /// Generate Ctrl+Alt+Del on this machine's console.
+    ///
+    /// The default asks Windows through `sas.dll`, which only a service can do;
+    /// anywhere else it says why it could not, and a test harness overrides it
+    /// rather than sending a real one.
+    fn send_sas(&mut self) -> std::result::Result<(), String> {
+        crate::secure::send_sas()
+    }
 }
 
 /// How long an unauthenticated peer may hold a connection open.
@@ -163,15 +172,17 @@ where
             }
             Some(Effect::SendSas) => {
                 // `sas.dll` is only available to SYSTEM with the policy set by
-                // the service installer; an agent running as the user will fail
-                // here with a string that stays in the host log. The client was
-                // already told `SasSent` — the request was heard — so the failure
-                // is not re-sent as a second reply.
-                if let Err(err) = crate::secure::send_sas() {
-                    warn!(%err, "SendSAS was asked for but did not happen");
-                } else {
-                    info!("Secure Attention Sequence sent");
+                // the service installer; an agent running as the user fails
+                // here. The reason stays in the host log, and the client is
+                // told the one thing it can act on: this host cannot do it.
+                // Answered after trying, because a reply sent before would
+                // claim success for something that had not happened.
+                let result = hooks.send_sas();
+                match &result {
+                    Ok(()) => info!("Secure Attention Sequence sent"),
+                    Err(err) => warn!(%err, "SendSAS was asked for but did not happen"),
                 }
+                control.send(&sas_reply(&result)).await?;
             }
             None => {}
         }
@@ -209,6 +220,21 @@ where
 /// The reason — no window station, another program holding the clipboard open,
 /// a platform with no clipboard at all — is in the host's log, where it is
 /// useful, rather than on the wire, where it describes the host to a peer.
+/// What to tell a client that asked for Ctrl+Alt+Del.
+///
+/// `SasSent` only when it went out. Otherwise an existing refusal rather than a
+/// new message, so a client of any protocol version reads it the way it reads
+/// every other refusal. `Unsupported`: the request was well formed and
+/// permitted, and this host cannot do it. The reason is the host's own and
+/// stays in its log.
+pub fn sas_reply(result: &std::result::Result<(), String>) -> pravera_proto::HostMessage {
+    use pravera_proto::{HostMessage, ProtocolError};
+    match result {
+        Ok(()) => HostMessage::SasSent,
+        Err(_) => HostMessage::Failed(ProtocolError::Unsupported),
+    }
+}
+
 fn clipboard_reply(answer: ClipboardAnswer) -> pravera_proto::HostMessage {
     use pravera_proto::{HostMessage, ProtocolError};
     match answer {
@@ -222,6 +248,15 @@ fn clipboard_reply(answer: ClipboardAnswer) -> pravera_proto::HostMessage {
 mod tests {
     use super::*;
     use pravera_proto::{ClipboardSeq, ClipboardUpdate, HostMessage, ProtocolError};
+
+    #[test]
+    fn ctrl_alt_del_is_only_reported_sent_when_it_was() {
+        assert_eq!(sas_reply(&Ok(())), HostMessage::SasSent);
+        assert_eq!(
+            sas_reply(&Err("could not load sas.dll".into())),
+            HostMessage::Failed(ProtocolError::Unsupported)
+        );
+    }
 
     #[test]
     fn a_clipboard_that_could_not_be_reached_says_nothing_about_why() {

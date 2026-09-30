@@ -126,9 +126,10 @@ pub enum Effect {
         cols: u16,
         rows: u16,
     },
-    /// Ask Windows to generate Ctrl+Alt+Del. Permission-checked (`CONTROL`)
-    /// and answered with `SasSent` before the effect runs, so the client knows
-    /// the request was heard even if `sas.dll` is not available.
+    /// Ask Windows to generate Ctrl+Alt+Del. Permission-checked (`CONTROL`).
+    /// The driver answers after trying: `SasSent` if the sequence went out, and
+    /// `Failed(Unsupported)` if this host cannot generate one, so the client
+    /// learns which rather than assuming.
     SendSas,
 }
 
@@ -500,10 +501,11 @@ impl<S: UserStore> HostSession<S> {
                 effect: Some(Effect::OpenTerminal { cols, rows }),
             },
 
-            ClientMessage::SendSas => Response {
-                reply: Some(HostMessage::SasSent),
-                effect: Some(Effect::SendSas),
-            },
+            // No reply here: whether the sequence went out is only known once
+            // the driver has tried, so the driver answers (`SasSent`, or a
+            // refusal), and the client, which is blocked on this request, gets
+            // exactly one message either way.
+            ClientMessage::SendSas => Response::effect(Effect::SendSas),
 
             // Not gated on a running stream. Someone with a clipboard grant and
             // no picture yet is a legitimate case — a script pushing text to a
@@ -1670,6 +1672,17 @@ mod tests {
             assert_eq!(response.effect, None, "{bad:?} was injected");
             assert_eq!(response.reply, None, "{bad:?} drew an unsolicited reply");
         }
+    }
+
+    #[test]
+    fn a_request_for_ctrl_alt_del_is_not_answered_before_it_is_tried() {
+        // The state machine hands the request to the driver and says nothing
+        // itself: a reply here would be sent before the outcome existed, and
+        // would claim a success that had not happened.
+        let mut host = streaming_as("driver", "drive-it");
+        let response = host.handle(ClientMessage::SendSas);
+        assert_eq!(response.reply, None);
+        assert_eq!(response.effect, Some(Effect::SendSas));
     }
 
     // ------------------------------------------------------------ terminals

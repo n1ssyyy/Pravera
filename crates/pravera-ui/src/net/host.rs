@@ -45,8 +45,7 @@ use tracing::{debug, info, warn};
 /// a different machine wondering why this one refuses.
 pub const NO_DISPLAY: &str = "This machine has no screen to share. Hosting refuses \
      until one appears: plug in a monitor or an HDMI/DisplayPort dummy plug, or \
-     let Pravera add its virtual display: install the Pravera service, or run \
-     pravera.exe once as administrator.";
+     add Pravera's virtual display from Settings, under Displays.";
 
 /// What the accepting half tells the interface.
 #[derive(Debug, Clone)]

@@ -196,6 +196,14 @@ pub struct State {
     remote: Option<Remote>,
     /// The serial of `remote`, so an unchanged report is not rebuilt.
     remote_serial: u64,
+    /// Ctrl+Alt+Del has been asked for and the host has not answered yet. The
+    /// button shows it, and a second press waits for the first.
+    sas_pending: bool,
+    /// The profile that was chosen and has not been answered yet. The thumb is
+    /// already there (it moved on the click), and the link's own profile,
+    /// which still says the old one, must not pull it back until the host has
+    /// said yes, said no, or said something else.
+    asking: Option<QualityProfile>,
     /// Cursor images built into drawable handles, by the host's id for them.
     /// Ids are never reused within a session, so an entry is never stale, and
     /// the whole cache goes with the session.
@@ -236,6 +244,8 @@ impl Default for State {
             gaming_request: None,
             remote: None,
             remote_serial: 0,
+            sas_pending: false,
+            asking: None,
             shapes: HashMap::new(),
         }
     }
@@ -256,10 +266,15 @@ impl State {
     /// puts them there.
     pub fn follow(&mut self, link: &Link, now: Instant) {
         let config = link.config();
-        let profile = QualityProfile::ALL
-            .iter()
-            .position(|&candidate| candidate == config.profile)
-            .unwrap_or(0);
+        let profile = if self.asking.is_some() {
+            // Where the click put it, until the host answers.
+            self.quality_thumb.chosen()
+        } else {
+            QualityProfile::ALL
+                .iter()
+                .position(|&candidate| candidate == config.profile)
+                .unwrap_or(0)
+        };
         let display = link
             .monitors()
             .iter()
@@ -277,6 +292,29 @@ impl State {
             self.display_thumb.snap(display);
             self.thumbs_synced = true;
         }
+    }
+
+    /// The host answered a request for Ctrl+Alt+Del, one way or the other.
+    pub fn sas_finished(&mut self) {
+        self.sas_pending = false;
+    }
+
+    /// The host reconfigured the stream and this is the profile it is now on.
+    ///
+    /// Returns whether that differs from the one that was asked for, so the
+    /// caller can say so. Either way the thumb goes to `actual` from here on:
+    /// [`State::follow`] takes over again, and slides it if it was somewhere
+    /// else.
+    pub fn answered(&mut self, actual: QualityProfile) -> bool {
+        self.asking
+            .take()
+            .is_some_and(|asked| asked != actual)
+    }
+
+    /// The host declined the profile. The thumb slides back to the real one on
+    /// the next look at the link.
+    pub fn declined(&mut self) {
+        self.asking = None;
     }
 
     /// A newly decoded frame.
@@ -641,6 +679,17 @@ pub fn update(state: &mut State, message: Message, now: Instant) -> Vec<Command>
 
         Message::Profile(profile) => {
             state.reveal(now);
+            // The tile starts sliding now rather than when the host has
+            // rebuilt the stream, which takes long enough that a click that
+            // shows nothing reads as one that did nothing. Before the first
+            // look at the link there is nothing to slide from, so the first
+            // sync still snaps.
+            if state.thumbs_synced {
+                if let Some(at) = QualityProfile::ALL.iter().position(|&p| p == profile) {
+                    state.quality_thumb.select(at, now);
+                }
+            }
+            state.asking = Some(profile);
             vec![Command::SetProfile(profile)]
         }
 
@@ -653,6 +702,11 @@ pub fn update(state: &mut State, message: Message, now: Instant) -> Vec<Command>
 
         Message::SendSas => {
             state.reveal(now);
+            // One at a time: the button is already showing that it is waiting.
+            if state.sas_pending {
+                return Vec::new();
+            }
+            state.sas_pending = true;
             vec![Command::SendSas]
         }
 
@@ -672,35 +726,53 @@ pub fn view<'a>(state: &'a State, link: &'a Link, now: Instant) -> Element<'a, M
     let showing = state.showing(now);
 
     let surface: Element<'_, Message> = match &state.picture {
-        Some(picture) => {
-            let control = link.can_control();
-            let picture_widget: Element<'_, Message> = shader(Surface {
-                video: Video::new(picture.clone()),
-                resolution: picture.resolution,
-                keyboard: state.keyboard,
-                hide_cursor: state.replaces_local_cursor(control),
-            })
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
-            match &state.remote {
-                // The host's cursor over the picture. A layer that takes no
-                // events and reports no interaction, so everything below it
-                // behaves exactly as it does without it.
-                Some(remote) => stack![
-                    picture_widget,
-                    remote_cursor::layer(remote_cursor::Layer {
-                        picture: picture.resolution,
-                        remote: Some(remote.clone()),
-                        follow_local: control && !state.gaming,
-                    })
-                ]
-                .into(),
-                None => picture_widget,
-            }
-        }
+        Some(picture) => picture_surface(state, picture, link.can_control()),
         None => waiting(state, link, now),
     };
+
+    stage(state, surface, now, || overlay(state, link, now, showing))
+}
+
+/// The picture, with the host's cursor over it when there is one.
+fn picture_surface<'a>(state: &'a State, picture: &Picture, control: bool) -> Element<'a, Message> {
+    let picture_widget: Element<'_, Message> = shader(Surface {
+        video: Video::new(picture.clone()),
+        resolution: picture.resolution,
+        keyboard: state.keyboard,
+        hide_cursor: state.replaces_local_cursor(control),
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into();
+    match &state.remote {
+        // The host's cursor over the picture. A layer that takes no
+        // events and reports no interaction, so everything below it
+        // behaves exactly as it does without it.
+        Some(remote) => stack![
+            picture_widget,
+            remote_cursor::layer(remote_cursor::Layer {
+                picture: picture.resolution,
+                remote: Some(remote.clone()),
+                follow_local: control && !state.gaming,
+            })
+        ]
+        .into(),
+        None => picture_widget,
+    }
+}
+
+/// The surface on its black ground, with the toolbar (or the reminder of how to
+/// open it) layered over.
+///
+/// Apart from [`view`] so a test can put the real picture layer and the real
+/// toolbar into it without a live connection to hang them on.
+fn stage<'a>(
+    state: &'a State,
+    surface: Element<'a, Message>,
+    now: Instant,
+    overlay: impl FnOnce() -> Element<'a, Message>,
+) -> Element<'a, Message> {
+    let showing = state.showing(now);
 
     let base = container(surface)
         .width(Length::Fill)
@@ -722,7 +794,7 @@ pub fn view<'a>(state: &'a State, link: &'a Link, now: Instant) -> Element<'a, M
         };
     }
 
-    stack![base, overlay(state, link, now, showing)].into()
+    stack![base, overlay()].into()
 }
 
 /// How long the first frame is allowed to take before the screen stops
@@ -901,31 +973,94 @@ fn overlay<'a>(
 ) -> Element<'a, Message> {
     // Slides down as it fades in. Eight pixels: enough to read as arriving
     // from behind the title bar, small enough not to look like a drawer.
+    let panel = state.stats.then(|| measurements(state, link, showing));
+    float(toolbar(state, &Facts::of(link), now, showing), panel, showing)
+}
+
+/// Lay the bar, and the panel under it when there is one, at the top of the
+/// screen: the one layer of the stack that reaches every pixel and answers to
+/// only the bar and the panel.
+fn float<'a>(
+    bar: Element<'a, Message>,
+    panel: Option<Element<'a, Message>>,
+    showing: f32,
+) -> Element<'a, Message> {
     let drop = t::SPACE_2 * (1.0 - showing);
 
+    let mut stacked = column![bar].spacing(t::SPACE_2).align_x(Alignment::Center);
+    if let Some(panel) = panel {
+        stacked = stacked.push(panel);
+    }
+
+    container(column![
+        Space::new().height(Length::Fixed(t::SPACE_3 + drop)),
+        stacked,
+    ])
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Alignment::Center)
+    .into()
+}
+
+/// What the toolbar says about the session it belongs to, and nothing else.
+///
+/// The bar used to take the [`Link`] itself, which cannot be made without a
+/// live connection, so nothing that draws it could be tested. These are the
+/// only five things it ever asked of the link.
+struct Facts<'a> {
+    route: Option<pravera_transport::RouteKind>,
+    host_name: &'a str,
+    playing_audio: bool,
+    missing_audio: bool,
+    can_control: bool,
+    monitors: &'a [pravera_proto::Monitor],
+}
+
+impl<'a> Facts<'a> {
+    fn of(link: &'a Link) -> Self {
+        Facts {
+            route: link.route(),
+            host_name: link.host_name(),
+            playing_audio: link.is_playing_audio(),
+            missing_audio: link.is_missing_audio(),
+            can_control: link.can_control(),
+            monitors: link.monitors(),
+        }
+    }
+}
+
+/// The floating bar itself: who this is, the quality profile, and the tools.
+fn toolbar<'a>(state: &'a State, facts: &Facts<'a>, now: Instant, showing: f32) -> Element<'a, Message> {
     let mut pill = row![
-        identity(link, showing),
+        identity(facts, showing),
         divider(showing),
         quality(state, now, showing),
     ]
     .spacing(t::SPACE_3)
     .align_y(Alignment::Center);
 
-    if link.monitors().len() > 1 {
+    if facts.monitors.len() > 1 {
         pill = pill
             .push(divider(showing))
-            .push(displays(state, link, now, showing));
+            .push(displays(state, facts.monitors, now, showing));
     }
 
     let tools = row![
-        tool(icon::KEYBOARD, state.keyboard, showing, Message::ToggleKeyboard),
-        tool(icon::GAUGE, state.stats, showing, Message::ToggleStats),
+        tool(icon::KEYBOARD, state.keyboard, showing, Some(Message::ToggleKeyboard)),
+        tool(icon::GAUGE, state.stats, showing, Some(Message::ToggleStats)),
         // Leaves the picture without ending the session. The session keeps
         // running in its own task while the file panes are on screen, which is
         // the whole reason files were kept off the control stream.
-        tool(icon::TRANSFERS, false, showing, Message::Files),
-        tool(icon::GAMEPAD, state.gaming, showing, Message::ToggleGaming),
-        tool(icon::LOCK, false, showing, Message::SendSas),
+        tool(icon::TRANSFERS, false, showing, Some(Message::Files)),
+        tool(icon::GAMEPAD, state.gaming, showing, Some(Message::ToggleGaming)),
+        // Held down while the host is answering, and not pressable again until
+        // it has: the answer can take a round trip and may be a refusal.
+        tool(
+            icon::LOCK,
+            state.sas_pending,
+            showing,
+            (!state.sas_pending).then_some(Message::SendSas),
+        ),
         end_session(showing),
     ]
     .spacing(t::SPACE_1)
@@ -968,25 +1103,11 @@ fn overlay<'a>(
     // An interaction of its own, so the stack stops here: without one the
     // toolbar said "nothing", and the picture under it hid the pointer and
     // took the moves meant for the buttons.
-    let mut stacked = column![mouse_area(bar)
+    mouse_area(bar)
         .interaction(mouse::Interaction::Idle)
         .on_enter(Message::OverTools(true))
-        .on_exit(Message::OverTools(false))]
-    .spacing(t::SPACE_2)
-    .align_x(Alignment::Center);
-
-    if state.stats {
-        stacked = stacked.push(measurements(state, link, showing));
-    }
-
-    container(column![
-        Space::new().height(Length::Fixed(t::SPACE_3 + drop)),
-        stacked,
-    ])
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .align_x(Alignment::Center)
-    .into()
+        .on_exit(Message::OverTools(false))
+        .into()
 }
 
 /// The reminder that appears where the controls would be.
@@ -1076,8 +1197,8 @@ fn keycap<'a>(label: &'static str, showing: f32) -> Element<'a, Message> {
 
 /// Which machine this is, how the packets are getting there, and how long the
 /// control stream takes to answer.
-fn identity<'a>(link: &'a Link, showing: f32) -> Element<'a, Message> {
-    let (tint, label) = match link.route() {
+fn identity<'a>(link: &Facts<'a>, showing: f32) -> Element<'a, Message> {
+    let (tint, label) = match link.route {
         Some(kind) => (route_tint(kind), route_label(kind)),
         None => (t::ROUTE_OFFLINE, "connecting"),
     };
@@ -1085,7 +1206,7 @@ fn identity<'a>(link: &'a Link, showing: f32) -> Element<'a, Message> {
     let mut facts = row![
         container(Space::new().width(6.0).height(6.0))
             .style(theme::badge(t::with_alpha(tint, showing))),
-        text(link.host_name().to_string())
+        text(link.host_name.to_string())
             .size(t::TEXT_SM)
             .font(t::FONT_UI_STRONG)
             .style(theme::tinted(t::with_alpha(t::FOREGROUND, showing))),
@@ -1102,13 +1223,13 @@ fn identity<'a>(link: &'a Link, showing: f32) -> Element<'a, Message> {
     // the person is waiting for that will never arrive. Silence somebody
     // chose gets nothing at all — a dock that announces every absence is a
     // dock nobody reads.
-    if link.is_playing_audio() {
+    if link.playing_audio {
         facts = facts.push(icon::stroked(
             icon::SPEAKER,
             13.0,
             t::with_alpha(t::SUBTLE_FOREGROUND, showing),
         ));
-    } else if link.is_missing_audio() {
+    } else if link.missing_audio {
         facts = facts.push(
             container(
                 text("NO SOUND")
@@ -1123,7 +1244,7 @@ fn identity<'a>(link: &'a Link, showing: f32) -> Element<'a, Message> {
 
     // Stated only where it is true, and stated plainly. A viewer whose clicks
     // vanish with no explanation would reasonably conclude the app is broken.
-    if !link.can_control() {
+    if !link.can_control {
         facts = facts.push(
             container(
                 text("VIEW ONLY")
@@ -1153,9 +1274,9 @@ fn quality<'a>(state: &'a State, now: Instant, showing: f32) -> Element<'a, Mess
 }
 
 /// The displays, when there is more than one and this login may see them.
-fn displays<'a>(state: &'a State, link: &'a Link, now: Instant, showing: f32) -> Element<'a, Message> {
+fn displays<'a>(state: &'a State, monitors: &'a [pravera_proto::Monitor], now: Instant, showing: f32) -> Element<'a, Message> {
     segments(
-        link.monitors()
+        monitors
             .iter()
             .enumerate()
             .map(|(index, monitor)| {
@@ -1262,7 +1383,7 @@ fn segments<'a>(
 }
 
 /// A square icon button that can be on or off.
-fn tool<'a>(glyph: &'static str, active: bool, showing: f32, message: Message) -> Element<'a, Message> {
+fn tool<'a>(glyph: &'static str, active: bool, showing: f32, message: Option<Message>) -> Element<'a, Message> {
     let tint = if active { t::FOREGROUND } else { t::SUBTLE_FOREGROUND };
     components::glide(move |hover| {
         button(icon::stroked(glyph, 14.0, t::with_alpha(tint, showing)))
@@ -1275,7 +1396,7 @@ fn tool<'a>(glyph: &'static str, active: bool, showing: f32, message: Message) -
                 style.border.radius = t::RADIUS_SM.into();
                 theme::fade_button(style, showing)
             })
-            .on_press(message)
+            .on_press_maybe(message)
             .into()
     })
 }
@@ -1679,7 +1800,7 @@ fn to_button(button: mouse::Button) -> Option<PointerButton> {
 
 // ------------------------------------------------------------------ labelling
 
-fn profile_label(profile: QualityProfile) -> String {
+pub fn profile_label(profile: QualityProfile) -> String {
     match profile {
         QualityProfile::Quality => "Quality",
         QualityProfile::Adaptive => "Adaptive",
@@ -2435,5 +2556,457 @@ mod tests {
         };
         assert!(state.replaces_local_cursor(false));
         assert!(state.replaces_local_cursor(true));
+    }
+
+    // ------------------------------------------------ the toolbar, headless
+    //
+    // The real picture layer and the real bar, in the real stack, driven by
+    // real pointer events over a software renderer. What each of these
+    // establishes is that pressing a control does what the control says,
+    // which reading the handlers cannot: a handler that works behind a button
+    // that never fires is a bug nobody can see from the handler.
+
+    use crate::headless::{self, Screen};
+    use iced::{Point, Rectangle, Size};
+
+    const WINDOW: Size = Size::new(1280.0, 720.0);
+
+    fn monitor(id: u8, name: &str) -> pravera_proto::Monitor {
+        pravera_proto::Monitor {
+            id: MonitorId(id),
+            name: name.to_string(),
+            resolution: Resolution::new(1920, 1080),
+            position: (0, 0),
+            scale: 1.0,
+            primary: id == 0,
+        }
+    }
+
+    /// The whole session screen as the running application builds it, except
+    /// that the facts come from a literal instead of a live connection.
+    fn stage_with<'a>(
+        state: &'a State,
+        facts: &Facts<'a>,
+        panel: Option<Element<'a, Message>>,
+    ) -> Element<'a, Message> {
+        let now = Instant::now();
+        let picture = state.picture.clone().expect("these tests have a picture");
+        stage(
+            state,
+            picture_surface(state, &picture, facts.can_control),
+            now,
+            || float(toolbar(state, facts, now, 1.0), panel, 1.0),
+        )
+    }
+
+    fn a_session() -> State {
+        State {
+            picture: Some(Picture::new(Resolution::new(1920, 1080), vec![0; 4], 1)),
+            // The state the toolbar is in while somebody is looking at it.
+            keyboard: false,
+            ..State::default()
+        }
+    }
+
+    /// The bar's strip of the window: generous, and short of the picture below.
+    fn bar_strip() -> Rectangle {
+        Rectangle::new(Point::new(220.0, 12.0), Size::new(840.0, 44.0))
+    }
+
+    /// What every click in `strip` published, grouped by message.
+    fn what_the_strip_does(
+        screen: &mut Screen<'_, Message>,
+        strip: Rectangle,
+    ) -> std::collections::BTreeMap<String, usize> {
+        let mut seen = std::collections::BTreeMap::new();
+        for (at, published) in screen.sweep(strip, 3.0) {
+            // Presses the picture would forward are the picture's, not the bar's.
+            let tools: Vec<String> = published
+                .iter()
+                .map(|message| format!("{message:?}"))
+                .filter(|message| !message.starts_with("Pointer") && !message.starts_with("Button"))
+                .collect();
+            assert!(
+                tools.len() <= 1,
+                "one click at {at:?} published {} messages: {tools:?}",
+                tools.len()
+            );
+            if let Some(only) = tools.into_iter().next() {
+                *seen.entry(only).or_insert(0) += 1;
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn every_button_on_the_toolbar_publishes_its_message_once_per_click() {
+        let state = a_session();
+        let facts = Facts {
+            route: Some(pravera_transport::RouteKind::Direct),
+            host_name: "EVERCORE",
+            playing_audio: true,
+            missing_audio: false,
+            can_control: true,
+            monitors: &[],
+        };
+        let mut screen = Screen::new(stage_with(&state, &facts, None), WINDOW);
+        let seen = what_the_strip_does(&mut screen, bar_strip());
+
+        for wanted in [
+            "ToggleKeyboard",
+            "ToggleStats",
+            "Files",
+            "ToggleGaming",
+            "SendSas",
+            "Disconnect",
+            "Profile(Quality)",
+            "Profile(Adaptive)",
+            "Profile(Latency)",
+        ] {
+            assert!(
+                seen.get(wanted).copied().unwrap_or(0) >= 3,
+                "clicking the {wanted} control did not publish it. Saw: {seen:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_display_choices_publish_their_own_monitor_when_there_are_several() {
+        let state = a_session();
+        let monitors = [monitor(0, "Display 1"), monitor(1, "Display 2")];
+        let facts = Facts {
+            route: Some(pravera_transport::RouteKind::Relay),
+            host_name: "EVERCORE",
+            playing_audio: false,
+            missing_audio: false,
+            can_control: true,
+            monitors: &monitors,
+        };
+        let mut screen = Screen::new(stage_with(&state, &facts, None), WINDOW);
+        let strip = Rectangle::new(Point::new(120.0, 12.0), Size::new(1040.0, 44.0));
+        let seen = what_the_strip_does(&mut screen, strip);
+
+        for wanted in ["Monitor(MonitorId(0))", "Monitor(MonitorId(1))", "Disconnect"] {
+            assert!(
+                seen.get(wanted).copied().unwrap_or(0) >= 3,
+                "clicking {wanted} did not publish it. Saw: {seen:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_toolbar_works_while_the_hosts_cursor_is_drawn_over_the_picture() {
+        // The cursor layer sits between the picture and the bar. It must not
+        // take a press meant for the bar, nor report an interaction that
+        // changes who the pointer is handed to.
+        let mut state = a_session();
+        state.remote = Some(remote(true, true));
+        let facts = Facts {
+            route: Some(pravera_transport::RouteKind::Direct),
+            host_name: "EVERCORE",
+            playing_audio: false,
+            missing_audio: false,
+            can_control: true,
+            monitors: &[],
+        };
+        let mut screen = Screen::new(stage_with(&state, &facts, None), WINDOW);
+        let seen = what_the_strip_does(&mut screen, bar_strip());
+        for wanted in ["ToggleKeyboard", "Files", "Disconnect", "Profile(Latency)"] {
+            assert!(
+                seen.get(wanted).copied().unwrap_or(0) >= 3,
+                "{wanted} did not publish with the cursor layer present. Saw: {seen:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_on_the_picture_still_reaches_the_host_and_not_the_bar() {
+        let state = a_session();
+        let facts = Facts {
+            route: Some(pravera_transport::RouteKind::Direct),
+            host_name: "EVERCORE",
+            playing_audio: false,
+            missing_audio: false,
+            can_control: true,
+            monitors: &[],
+        };
+        let mut screen = Screen::new(stage_with(&state, &facts, None), WINDOW);
+        let published = screen.feed(headless::click(Point::new(640.0, 400.0)));
+        let names: Vec<String> = published.iter().map(|m| format!("{m:?}")).collect();
+        assert!(
+            names.iter().any(|m| m.starts_with("Button") && m.contains("pressed: true")),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().any(|m| m.starts_with("Button") && m.contains("pressed: false")),
+            "{names:?}"
+        );
+        assert!(!names.iter().any(|m| m == "Disconnect" || m == "Files"), "{names:?}");
+    }
+
+    // ------------------------------------- the toolbar, as the application runs it
+    //
+    // The tests above build the interface once and press it. The application
+    // does not: after every event it builds the view again from its state and
+    // diffs it against the last one, so a control's half-finished press has to
+    // survive a rebuild in between. This drives that loop: build, feed one
+    // event, keep the widget state, apply what came out, and go round again.
+
+    struct Rig {
+        state: State,
+        renderer: iced::Renderer,
+        cache: Option<iced_runtime::user_interface::Cache>,
+        clock: Instant,
+        log: Vec<String>,
+    }
+
+    impl Rig {
+        fn new(state: State) -> Self {
+            Rig {
+                state,
+                renderer: headless::renderer(),
+                cache: Some(iced_runtime::user_interface::Cache::default()),
+                clock: Instant::now(),
+                log: Vec::new(),
+            }
+        }
+
+        fn facts() -> Facts<'static> {
+            Facts {
+                route: Some(pravera_transport::RouteKind::Direct),
+                host_name: "EVERCORE",
+                playing_audio: true,
+                missing_audio: false,
+                can_control: true,
+                monitors: &[],
+            }
+        }
+
+        /// One event through one build of the view, then its messages applied.
+        fn event(&mut self, event: iced::Event, cursor: iced::mouse::Cursor) {
+            self.state.tick(self.clock);
+            let facts = Rig::facts();
+            let mut messages = Vec::new();
+            {
+                let view = stage_with(&self.state, &facts, None);
+                let mut ui = iced_runtime::user_interface::UserInterface::build(
+                    view,
+                    WINDOW,
+                    self.cache.take().unwrap_or_default(),
+                    &mut self.renderer,
+                );
+                ui.update(
+                    std::slice::from_ref(&event),
+                    cursor,
+                    &mut self.renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                self.cache = Some(ui.into_cache());
+            }
+            for message in messages {
+                self.log.push(format!("{message:?}"));
+                update(&mut self.state, message, self.clock);
+            }
+        }
+
+        fn steps(&mut self, steps: Vec<headless::Step>) {
+            for (event, cursor) in steps {
+                self.event(event, cursor);
+                // Frames are sixteen milliseconds apart.
+                self.clock += Duration::from_millis(16);
+            }
+        }
+
+        fn click(&mut self, at: Point) {
+            self.steps(headless::click(at));
+        }
+
+        fn saw(&self, name: &str) -> usize {
+            self.log.iter().filter(|line| line.as_str() == name).count()
+        }
+    }
+
+    /// Where a control of the bar is, found the way a person would: by
+    /// pressing where it should be until it answers.
+    fn find(name: &str) -> Point {
+        let state = a_session();
+        let facts = Rig::facts();
+        let mut screen = Screen::new(stage_with(&state, &facts, None), WINDOW);
+        let hits: Vec<Point> = screen
+            .sweep(bar_strip(), 3.0)
+            .into_iter()
+            .filter(|(_, published)| published.iter().any(|m| format!("{m:?}") == name))
+            .map(|(at, _)| at)
+            .collect();
+        assert!(!hits.is_empty(), "nothing on the bar publishes {name}");
+        let x = hits.iter().map(|p| p.x).sum::<f32>() / hits.len() as f32;
+        let y = hits.iter().map(|p| p.y).sum::<f32>() / hits.len() as f32;
+        Point::new(x, y)
+    }
+
+    #[test]
+    fn each_tool_works_when_the_view_is_rebuilt_between_every_event() {
+        let mut rig = Rig::new(a_session());
+        for name in ["ToggleStats", "ToggleGaming", "Files", "SendSas"] {
+            let at = find(name);
+            rig.click(at);
+            assert_eq!(rig.saw(name), 1, "{name}: {:?}", rig.log);
+        }
+        // The two that change what the bar looks like.
+        let keyboard = find("ToggleKeyboard");
+        rig.click(keyboard);
+        assert_eq!(rig.saw("ToggleKeyboard"), 1, "{:?}", rig.log);
+        rig.click(keyboard);
+        assert_eq!(rig.saw("ToggleKeyboard"), 2, "{:?}", rig.log);
+    }
+
+    #[test]
+    fn a_profile_can_be_chosen_after_another_has_been() {
+        let mut rig = Rig::new(a_session());
+        for name in ["Profile(Quality)", "Profile(Latency)", "Profile(Adaptive)", "Profile(Latency)"] {
+            rig.click(find(name));
+        }
+        assert_eq!(rig.saw("Profile(Quality)"), 1, "{:?}", rig.log);
+        assert_eq!(rig.saw("Profile(Latency)"), 2, "{:?}", rig.log);
+        assert_eq!(rig.saw("Profile(Adaptive)"), 1, "{:?}", rig.log);
+    }
+
+    #[test]
+    fn the_end_button_ends_the_session_from_a_toolbar_that_has_just_appeared() {
+        // The state a session is in when somebody reaches for the controls
+        // while the keyboard is captured: bar shown by the chord, pointer
+        // brought in from the picture below.
+        let mut rig = Rig::new(State {
+            keyboard: true,
+            ..a_session()
+        });
+        rig.event(
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: Point::new(640.0, 400.0) }),
+            iced::mouse::Cursor::Available(Point::new(640.0, 400.0)),
+        );
+        // Chord: opens the controls.
+        rig.state.reveal(rig.clock);
+        let end = find("Disconnect");
+        // Travel up to the bar in a few moves, as a hand does.
+        for step in 0..8 {
+            let t = step as f32 / 7.0;
+            let at = Point::new(640.0 + (end.x - 640.0) * t, 400.0 + (end.y - 400.0) * t);
+            rig.steps(headless::arrive(at));
+        }
+        rig.steps(headless::press_and_release(end));
+        assert_eq!(rig.saw("Disconnect"), 1, "{:?}", rig.log);
+    }
+
+    // ------------------------------------------- the quality tile, optimistic
+
+    fn synced() -> State {
+        let mut state = State::default();
+        // As after the first look at the link: the tiles are placed.
+        state.quality_thumb.snap(1);
+        state.display_thumb.snap(0);
+        state.thumbs_synced = true;
+        state
+    }
+
+    fn slot(profile: QualityProfile) -> usize {
+        QualityProfile::ALL.iter().position(|&p| p == profile).unwrap()
+    }
+
+    #[test]
+    fn the_tile_starts_sliding_on_the_click_not_when_the_host_answers() {
+        let mut state = synced();
+        let now = Instant::now();
+        let other = QualityProfile::ALL[(state.quality_thumb.chosen() + 1) % QualityProfile::ALL.len()];
+        let commands = update(&mut state, Message::Profile(other), now);
+        assert!(matches!(commands.as_slice(), [Command::SetProfile(p)] if *p == other));
+        assert_eq!(state.quality_thumb.chosen(), slot(other));
+        // Under way already, not at rest.
+        assert!(state.quality_thumb.position(now + Duration::from_millis(30)) != slot(other) as f32);
+    }
+
+    #[test]
+    fn the_first_look_at_the_link_still_snaps_rather_than_slides() {
+        // Nothing has been placed yet, so a click before the link has been
+        // read cannot slide from anywhere.
+        let mut state = State::default();
+        assert!(!state.thumbs_synced);
+        update(&mut state, Message::Profile(QualityProfile::ALL[2]), Instant::now());
+        assert_eq!(state.quality_thumb.chosen(), 0);
+        assert_eq!(state.asking, Some(QualityProfile::ALL[2]));
+    }
+
+    #[test]
+    fn a_refusal_lets_the_tile_go_back_to_what_the_link_says() {
+        let mut state = synced();
+        let now = Instant::now();
+        let real = QualityProfile::ALL[state.quality_thumb.chosen()];
+        let other = QualityProfile::ALL[(state.quality_thumb.chosen() + 1) % QualityProfile::ALL.len()];
+        update(&mut state, Message::Profile(other), now);
+        assert!(state.asking.is_some());
+
+        state.declined();
+        assert_eq!(state.asking, None);
+        // `follow` takes the link's profile again and slides the tile to it.
+        state.choose(slot(real), 0, now + Duration::from_millis(5));
+        assert_eq!(state.quality_thumb.chosen(), slot(real));
+    }
+
+    #[test]
+    fn an_answer_that_is_not_what_was_asked_for_is_reported_and_wins() {
+        let mut state = synced();
+        let asked = QualityProfile::ALL[2];
+        let got = QualityProfile::ALL[0];
+        update(&mut state, Message::Profile(asked), Instant::now());
+        assert!(state.answered(got), "a different profile came back");
+        assert_eq!(state.asking, None);
+    }
+
+    #[test]
+    fn an_answer_that_matches_is_not_news() {
+        let mut state = synced();
+        let asked = QualityProfile::ALL[2];
+        update(&mut state, Message::Profile(asked), Instant::now());
+        assert!(!state.answered(asked));
+        // And nothing was asked, so nothing differs.
+        assert!(!state.answered(asked));
+    }
+
+    // ------------------------------------------------------------ Ctrl+Alt+Del
+
+    #[test]
+    fn asking_for_ctrl_alt_del_marks_it_pending_until_the_host_answers() {
+        let mut state = State::default();
+        let now = Instant::now();
+        let first = update(&mut state, Message::SendSas, now);
+        assert!(matches!(first.as_slice(), [Command::SendSas]));
+        assert!(state.sas_pending);
+
+        // Pressed again while waiting: nothing more is sent.
+        assert!(update(&mut state, Message::SendSas, now).is_empty());
+
+        state.sas_finished();
+        assert!(!state.sas_pending);
+        assert!(matches!(update(&mut state, Message::SendSas, now).as_slice(), [Command::SendSas]));
+    }
+
+    #[test]
+    fn the_lock_button_cannot_be_pressed_while_it_is_waiting() {
+        let state = State {
+            sas_pending: true,
+            ..a_session()
+        };
+        let facts = Facts {
+            route: Some(pravera_transport::RouteKind::Direct),
+            host_name: "EVERCORE",
+            playing_audio: false,
+            missing_audio: false,
+            can_control: true,
+            monitors: &[],
+        };
+        let mut screen = Screen::new(stage_with(&state, &facts, None), WINDOW);
+        let seen = what_the_strip_does(&mut screen, bar_strip());
+        assert_eq!(seen.get("SendSas"), None, "{seen:?}");
+        assert!(seen.get("Disconnect").copied().unwrap_or(0) >= 3, "{seen:?}");
     }
 }

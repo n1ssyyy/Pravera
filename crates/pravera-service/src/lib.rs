@@ -112,6 +112,12 @@ pub enum Installed {
     /// Not an error: Pravera runs perfectly well without it, just not before
     /// somebody signs in.
     NotElevated,
+    /// Not registered. Only ever said by a read that changed nothing, so it
+    /// says nothing about whether a change would be allowed.
+    NotRegistered,
+    /// Registered, but for a different copy of Pravera: this file moved, or
+    /// another one set the service up. It starts at boot, just not this file.
+    Elsewhere,
     /// Registered, but Windows refused for some other reason, in its words.
     Refused(String),
 }
@@ -144,6 +150,46 @@ pub fn ensure_installed() -> Installed {
     // rather than by the application, because a program that writes its own
     // unit file into /etc is a program fighting the package manager.
     Installed::NotElevated
+}
+
+/// What is registered, read without changing anything and without elevation.
+///
+/// The interface asks this on every visit to Settings, and on every start. It
+/// is [`ensure_installed`] that must not be called for a question: it writes.
+pub fn current() -> Installed {
+    #[cfg(windows)]
+    {
+        scm::current()
+    }
+    #[cfg(not(windows))]
+    {
+        Installed::NotRegistered
+    }
+}
+
+/// The start-of-run reconciliation: keep a registration that exists pointed at
+/// this copy, and never create one.
+///
+/// Creating the service used to happen here whenever the process was
+/// elevated. That made "Stop starting at boot" undoable by the next elevated
+/// start, which is a switch that turns itself back on. Registering is now the
+/// person's decision, made in Settings.
+pub fn reconcile() -> Installed {
+    match current() {
+        Installed::Unchanged => {
+            // Registered and right. The write is only to start a stopped
+            // service and to re-assert the Ctrl+Alt+Del policy, and an
+            // ordinary process is refused it, which changes nothing worth
+            // reporting.
+            let _ = ensure_installed();
+            Installed::Unchanged
+        }
+        Installed::Elsewhere => match ensure_installed() {
+            Installed::NotElevated => Installed::Elsewhere,
+            repointed => repointed,
+        },
+        other => other,
+    }
 }
 
 /// Remove the registration. The interface offers this; nothing calls it by
@@ -215,6 +261,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn asking_what_is_registered_is_a_read_that_never_needs_elevation() {
+        // Whatever this machine has, the answer is one of the states that
+        // describe it; never `NotElevated`, which is the answer to a write.
+        let state = current();
+        eprintln!("the service on this machine reads as {state:?}");
+        assert!(!matches!(state, Installed::NotElevated), "{state:?}");
+        // The test binary is not the registered copy, so a machine that has the
+        // service registered for some other file reads as elsewhere.
+        assert!(!state.is_installed(), "{state:?}");
+    }
+
+    #[test]
     fn only_a_real_registration_counts_as_installed() {
         assert!(Installed::Registered.is_installed());
         assert!(Installed::Repointed.is_installed());
@@ -223,6 +281,8 @@ mod tests {
         // either as success would put a reassuring line in the interface on a
         // machine that is not actually covered.
         assert!(!Installed::NotElevated.is_installed());
+        assert!(!Installed::NotRegistered.is_installed());
+        assert!(!Installed::Elsewhere.is_installed());
         assert!(!Installed::Refused("anything".into()).is_installed());
     }
 }
