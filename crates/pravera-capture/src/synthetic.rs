@@ -201,14 +201,10 @@ fn generate(
 
         let elapsed = now.duration_since(started);
 
-        // Advance from the previous deadline rather than from now, so the
-        // cadence does not drift by however long painting took. If painting
-        // fell more than a whole interval behind, give up on catching up and
-        // resynchronise: chasing a backlog only makes the next frame later.
-        next += interval;
-        if next < now {
-            next = now + interval;
-        }
+        // The next deadline is one whole interval after whichever is later: the
+        // deadline this frame was supposed to meet, or the moment it actually
+        // went out. See [`next_deadline`].
+        next = next_deadline(next, now, interval);
 
         // Nothing moved since the last frame, so there is no frame to send.
         // Real backends behave exactly this way — a still desktop produces no
@@ -235,6 +231,23 @@ fn generate(
     }
 
     sink.end();
+}
+
+/// The next deadline, given the one this frame was meant to meet and the
+/// moment it actually went out.
+///
+/// It is one whole interval after whichever of those two is later, which makes
+/// the gap between any two frames at least `interval` however late a frame
+/// was. That is the promise a frame-rate cap makes, and it is worth spelling
+/// out because the obvious alternative is wrong in a way that only shows on a
+/// loaded machine: adding `interval` to the old deadline and resynchronising
+/// only once a *whole* interval had been lost leaves the deadline in the
+/// future whenever the overrun was smaller than one interval, so the frame
+/// after a slow one went out almost at once. A 10 fps cap delivered 30 fps
+/// that way on a busy runner, which is what
+/// `a_frame_rate_cap_is_respected` caught.
+fn next_deadline(deadline: Instant, now: Instant, interval: Duration) -> Instant {
+    deadline.max(now) + interval
 }
 
 /// The framebuffer being drawn into, plus what changed in it.
@@ -659,6 +672,45 @@ mod tests {
         assert!(
             gap >= Duration::from_millis(80),
             "frames arrived {gap:?} apart, faster than the 10 fps cap"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_goes_out_late_still_costs_a_whole_interval_before_the_next() {
+        // The rule the loop above relies on, checked without a clock and
+        // without a slow paint, so it holds on a machine too fast to ever trip
+        // the end-to-end test. A 10 fps cap is 100 ms.
+        let interval = Duration::from_millis(100);
+        let due = Instant::now();
+
+        // On time: the next deadline is one interval on, not two.
+        assert_eq!(
+            next_deadline(due, due, interval) - due,
+            interval,
+            "a frame that met its deadline should not push the next one out by two intervals"
+        );
+
+        // Late by less than an interval. This is the case that used to go
+        // wrong: adding one interval to the old deadline left it in the
+        // future, so the next frame was released 10 ms later and the cap was
+        // delivering three times the rate it promised.
+        let late_by = Duration::from_millis(90);
+        let now = due + late_by;
+        let next = next_deadline(due, now, interval);
+        assert_eq!(
+            next - now,
+            interval,
+            "a frame {late_by:?} late must still be followed by a full interval"
+        );
+
+        // Late by more than an interval, which is the backlog case the old
+        // resynchronisation did handle.
+        let now = due + interval * 5;
+        let next = next_deadline(due, now, interval);
+        assert_eq!(
+            next - now,
+            interval,
+            "a badly overdue frame must not be followed by a catch-up burst"
         );
     }
 }
