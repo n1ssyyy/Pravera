@@ -55,7 +55,7 @@ use crate::{scan_code, InputError, InputSink, Result};
 /// own capture side. Without it a host that also captures input would feed
 /// injected events back to the client and produce a loop; with it, the loop is
 /// one comparison away from being broken.
-const PRAVERA_TAG: usize = 0x5052_4156;
+pub const PRAVERA_TAG: usize = 0x5052_4156;
 
 /// The full range of a normalised absolute coordinate, per `MOUSEINPUT`.
 const ABSOLUTE_RANGE: f64 = 65535.0;

@@ -5,7 +5,7 @@
 
 use std::net::SocketAddr;
 
-use iroh::endpoint::presets;
+use iroh::endpoint::{presets, ConnectOptions};
 use iroh::{Endpoint, SecretKey};
 use pravera_core::DeviceId;
 use pravera_crypto::Identity;
@@ -15,10 +15,13 @@ use crate::error::{Result, TransportError};
 use crate::peer::{PeerAddress, PeerKey};
 use crate::session::Session;
 
-/// The application protocol name negotiated during the TLS handshake.
+/// The newest application protocol name, negotiated during the TLS handshake.
 ///
 /// Carries the protocol version, so two incompatible builds are separated by
-/// QUIC before either sends an application byte.
+/// QUIC before either sends an application byte. An endpoint accepts every
+/// version in [`pravera_proto::ALPNS`], and a dialler offers all of them in the
+/// one handshake: the host picks the newest both ends know, so no retry is ever
+/// needed and an old host is not dialled twice.
 pub const ALPN: &[u8] = pravera_proto::ALPN;
 
 /// How far this endpoint can be reached from.
@@ -56,6 +59,24 @@ impl Transport {
     /// is provably the machine that key names. There is no separate
     /// certificate, no CA, and nothing to configure.
     pub async fn bind(identity: &Identity, reachability: Reachability) -> Result<Self> {
+        Self::bind_up_to(identity, reachability, pravera_proto::VERSION).await
+    }
+
+    /// Like [`Transport::bind`], but speaking no protocol newer than `newest`.
+    ///
+    /// Exists so a test can stand up a host that behaves like an older build and
+    /// prove a newer viewer still connects to it. Nothing in the product calls
+    /// it with anything but the current version.
+    pub async fn bind_up_to(
+        identity: &Identity,
+        reachability: Reachability,
+        newest: u16,
+    ) -> Result<Self> {
+        let alpns: Vec<Vec<u8>> = pravera_proto::ALPNS
+            .iter()
+            .filter(|alpn| pravera_proto::version_of_alpn(alpn).is_some_and(|v| v <= newest))
+            .map(|alpn| alpn.to_vec())
+            .collect();
         let secret = SecretKey::from_bytes(&identity.secret_bytes());
 
         let builder = match reachability {
@@ -65,7 +86,7 @@ impl Transport {
 
         let endpoint = builder
             .secret_key(secret)
-            .alpns(vec![ALPN.to_vec()])
+            .alpns(alpns)
             .bind()
             .await
             .map_err(TransportError::bind)?;
@@ -111,9 +132,19 @@ impl Transport {
     /// that is the next conversation, over the control stream.
     pub async fn connect(&self, peer: &PeerAddress) -> Result<Session> {
         let addr = peer.to_endpoint_addr()?;
+        let older = pravera_proto::ALPNS[1..]
+            .iter()
+            .map(|alpn| alpn.to_vec())
+            .collect();
         let connection = self
             .endpoint
-            .connect(addr, ALPN)
+            .connect_with_opts(
+                addr,
+                ALPN,
+                ConnectOptions::new().with_additional_alpns(older),
+            )
+            .await
+            .map_err(TransportError::unreachable)?
             .await
             .map_err(TransportError::unreachable)?;
         Session::from_connection(connection)

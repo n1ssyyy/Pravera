@@ -14,6 +14,7 @@
 pub mod accounts;
 pub mod agent;
 pub mod audio;
+pub mod cursor;
 pub mod files;
 pub mod media;
 pub mod secure;
@@ -88,6 +89,9 @@ where
     S: UserStore,
     H: SessionHooks,
 {
+    // The version was settled by the TLS handshake. Every message on this
+    // connection is that version's, so the state machine holds `Hello` to it.
+    host.set_version(session.protocol_version());
     let mut control = session.accept_control().await?;
     debug!(peer = %host.peer(), "control stream open");
 

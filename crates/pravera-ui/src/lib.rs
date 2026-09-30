@@ -2154,15 +2154,7 @@ impl Pravera {
         // queues are drained and dropped, so a stale key cannot fire into a
         // session that opens later.
         if let Some(live) = self.tabs.active_session_mut() {
-            for taken in net::grab::drain() {
-                let message = screens::session::Message::Key {
-                    code: taken.code,
-                    pressed: taken.pressed,
-                };
-                for command in screens::session::update(&mut live.state, message, self.now) {
-                    live.link.send(command);
-                }
-            }
+            forward_grabbed(live, self.now);
 
             // Every pointer position the mouse produced since the last frame,
             // at its own rate rather than the display's. See `net::pointer`
@@ -2233,6 +2225,7 @@ impl Pravera {
             if let Some(picture) = live.link.next_picture() {
                 live.state.show(picture);
             }
+            live.state.follow_cursor(&live.link);
             live.state.tick(self.now);
             live.state.follow(&live.link, self.now);
 
@@ -2825,6 +2818,14 @@ impl Pravera {
         let Some(live) = self.tabs.active_session_mut() else {
             return Task::none();
         };
+
+        // A key the window reports goes out behind every key the hook took
+        // before it. The hook's queue is otherwise only emptied once a frame,
+        // and Win+R would reach the far machine as R and then Win whenever the
+        // R got here first.
+        if matches!(message, screens::session::Message::Key { .. }) {
+            forward_grabbed(live, self.now);
+        }
 
         for command in screens::session::update(&mut live.state, message, self.now) {
             live.link.send(command);
@@ -4128,6 +4129,20 @@ fn clipped(words: &str, most: usize) -> String {
     let mut cut: String = words.chars().take(most.saturating_sub(1)).collect();
     cut.push('…');
     cut
+}
+
+/// Send the session everything the keyboard hook has taken since the last
+/// call, in the order it was taken.
+fn forward_grabbed(live: &mut Live, now: Instant) {
+    for taken in net::grab::drain() {
+        let message = screens::session::Message::Key {
+            code: taken.code,
+            pressed: taken.pressed,
+        };
+        for command in screens::session::update(&mut live.state, message, now) {
+            live.link.send(command);
+        }
+    }
 }
 
 /// The raw event listener. A plain function, because the subscription it

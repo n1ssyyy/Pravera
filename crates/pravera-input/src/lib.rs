@@ -42,6 +42,12 @@ mod linux;
 #[cfg(windows)]
 mod win32;
 
+/// The `dwExtraInfo` value on every key and pointer event this crate injects
+/// on Windows. A low-level hook on the same machine compares against it to
+/// tell Pravera's own input from anybody else's.
+#[cfg(windows)]
+pub use win32::PRAVERA_TAG as INJECTION_TAG;
+
 /// Somewhere input events can be injected.
 ///
 /// Every method reports failure rather than swallowing it. A dropped key press
@@ -110,6 +116,29 @@ impl Screen {
             self.origin.0 + across.round() as i32,
             self.origin.1 + down.round() as i32,
         )
+    }
+
+    /// The reverse of [`Screen::to_desktop`]: where a desktop pixel sits on
+    /// this display, as a fraction of it. `None` when the pixel is on another
+    /// display.
+    ///
+    /// Uses the same `width - 1` span as the forward direction, so feeding the
+    /// result back through `to_desktop` lands on the same pixel. That is what
+    /// lets a viewer draw the host's cursor exactly where a click at that spot
+    /// would land.
+    pub fn from_desktop(&self, x: i32, y: i32) -> Option<(f32, f32)> {
+        let across = i64::from(x) - i64::from(self.origin.0);
+        let down = i64::from(y) - i64::from(self.origin.1);
+        if across < 0
+            || down < 0
+            || across >= i64::from(self.resolution.width)
+            || down >= i64::from(self.resolution.height)
+        {
+            return None;
+        }
+        let span_x = i64::from(self.resolution.width.saturating_sub(1)).max(1);
+        let span_y = i64::from(self.resolution.height.saturating_sub(1)).max(1);
+        Some((across as f32 / span_x as f32, down as f32 / span_y as f32))
     }
 }
 
@@ -257,6 +286,43 @@ impl InputSink for RecordingSink {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_desktop_pixel_survives_the_round_trip_through_the_fraction() {
+        for screen in [
+            Screen::new((0, 0), Resolution::new(1920, 1080)),
+            Screen::new((1920, 0), Resolution::new(2560, 1440)),
+            Screen::new((-1080, -200), Resolution::new(1080, 1920)),
+            Screen::new((0, 0), Resolution::new(3, 3)),
+            Screen::new((5, 7), Resolution::new(1, 1)),
+        ] {
+            let (w, h) = (screen.resolution.width as i32, screen.resolution.height as i32);
+            for (dx, dy) in [(0, 0), (w - 1, h - 1), (w / 2, h / 3), (w - 1, 0), (0, h - 1)] {
+                let (x, y) = (screen.origin.0 + dx, screen.origin.1 + dy);
+                let (fx, fy) = screen.from_desktop(x, y).expect("on the display");
+                assert_eq!(screen.to_desktop(fx, fy), (x, y), "{screen:?} at {dx},{dy}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_pixel_across_a_row_round_trips() {
+        let screen = Screen::new((100, 0), Resolution::new(1366, 768));
+        for dx in 0..1366 {
+            let (fx, _) = screen.from_desktop(100 + dx, 10).unwrap();
+            assert_eq!(screen.to_desktop(fx, 0.0).0, 100 + dx);
+        }
+    }
+
+    #[test]
+    fn a_pixel_off_the_display_has_no_fraction() {
+        let screen = Screen::new((1920, 0), Resolution::new(1920, 1080));
+        assert_eq!(screen.from_desktop(1919, 5), None);
+        assert_eq!(screen.from_desktop(3840, 5), None);
+        assert_eq!(screen.from_desktop(2000, -1), None);
+        assert_eq!(screen.from_desktop(2000, 1080), None);
+        assert!(screen.from_desktop(1920, 0).is_some());
+    }
+
     use super::*;
 
     const SCREEN: Screen = Screen {

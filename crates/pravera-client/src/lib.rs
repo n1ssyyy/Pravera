@@ -24,12 +24,14 @@
 //! open internet.
 
 pub mod audio;
+pub mod cursor;
 mod error;
 pub mod files;
 pub mod terminal;
 mod video;
 
 pub use audio::{AudioSink, AudioStats, AudioStream};
+pub use cursor::{CursorImage, CursorState, CursorStream};
 pub use error::{ClientError, Result};
 pub use files::Progress;
 pub use terminal::{Terminal, TerminalEvent};
@@ -40,8 +42,8 @@ use std::time::Duration;
 use pravera_core::{for_log, AudioFormat, Codec, Permission, QualityProfile, Resolution};
 use pravera_proto::{
     AuthResult, ClientMessage, ClipboardSeq, ClipboardUpdate, Credentials, Hello, HostMessage,
-    InputEvent, Monitor, MonitorId, SessionConfig, SessionRequest, Welcome, MAX_CLIPBOARD_BYTES,
-    VERSION,
+    InputEvent, Monitor, MonitorId, SessionConfig, SessionRequest, Welcome, CURSOR_VERSION,
+    MAX_CLIPBOARD_BYTES,
 };
 use pravera_transport::{ClientControl, PeerAddress, Session, Transport};
 use tracing::{debug, info, warn};
@@ -126,11 +128,14 @@ impl Client {
     /// Separate from [`Client::connect`] so a session obtained some other way —
     /// a direct-link dial, a test harness — takes the same path.
     pub async fn greet(session: Session, config: &ClientConfig) -> Result<Client> {
+        // The version the handshake settled on, which may be older than this
+        // build's newest: a host that has not been updated only speaks 2.
+        let version = session.protocol_version();
         let mut control = session.open_control().await?;
 
         let reply = control
             .request(&ClientMessage::Hello(Hello {
-                version: VERSION,
+                version,
                 client_name: config.client_name.clone(),
                 codecs: config.codecs.clone(),
             }))
@@ -141,13 +146,13 @@ impl Client {
             other => return Err(refusal(other, "Welcome")),
         };
 
-        if welcome.version != VERSION {
+        if welcome.version != version {
             // The host should already have refused this, and says so through
             // `Failed` rather than `Welcome`. Checked anyway, because a client
             // that trusts a peer's framing to be well-behaved is a client that
             // does whatever a hostile peer wants.
             return Err(ClientError::VersionMismatch {
-                ours: VERSION,
+                ours: version,
                 theirs: welcome.version,
             });
         }
@@ -180,6 +185,22 @@ impl Client {
     /// device key, which the TLS handshake already proved.
     pub fn welcome(&self) -> &Welcome {
         &self.welcome
+    }
+
+    /// The protocol version this connection speaks. Features newer than version
+    /// 2 exist only when it says so.
+    pub fn protocol_version(&self) -> u16 {
+        self.session.protocol_version()
+    }
+
+    /// The host's cursor, if this connection carries one (protocol version 3).
+    ///
+    /// `None` means the host draws its cursor into the picture, as it always
+    /// did, and the interface should show that and nothing more. Must be called
+    /// inside a tokio runtime, once per connection.
+    pub fn cursor(&self) -> Option<CursorStream> {
+        (self.protocol_version() >= CURSOR_VERSION)
+            .then(|| CursorStream::start(self.session.clone()))
     }
 
     /// The host's device ID, derived from the key it authenticated with.

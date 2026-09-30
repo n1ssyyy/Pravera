@@ -11,7 +11,7 @@ use pravera_core::DeviceId;
 
 use crate::bulk::BulkStream;
 use crate::control::{ClientControl, ControlStream, HostControl};
-use crate::endpoint::ALPN;
+use crate::cursor::{CursorReceiver, CursorSender};
 use crate::error::{Result, TransportError};
 use crate::peer::PeerKey;
 
@@ -58,23 +58,36 @@ impl Route {
 pub struct Session {
     connection: Connection,
     peer: PeerKey,
+    version: u16,
 }
 
 impl Session {
     pub(crate) fn from_connection(connection: Connection) -> Result<Self> {
         // iroh only completes a handshake for an ALPN the endpoint was
-        // configured with, so this cannot currently fail. It is checked anyway:
-        // the day a second ALPN is added, this is the line that stops a peer
-        // speaking the other protocol from being handed to the session code.
+        // configured with, so an unknown one cannot currently arrive. It is
+        // checked anyway, and it is also where the session's protocol version
+        // is read: the ALPN names it, and every message on this connection is
+        // that version's.
         let negotiated = connection.alpn();
-        if negotiated != ALPN {
+        let Some(version) = pravera_proto::version_of_alpn(negotiated) else {
             return Err(TransportError::WrongProtocol {
                 negotiated: String::from_utf8_lossy(negotiated).into_owned(),
             });
-        }
+        };
 
         let peer = PeerKey::from(connection.remote_id());
-        Ok(Session { connection, peer })
+        Ok(Session {
+            connection,
+            peer,
+            version,
+        })
+    }
+
+    /// The protocol version negotiated for this connection: the newest one both
+    /// ends speak. Features newer than version 2 must be gated on this, not on
+    /// what this build supports.
+    pub fn protocol_version(&self) -> u16 {
+        self.version
     }
 
     /// The public key the peer proved during the handshake.
@@ -173,6 +186,33 @@ impl Session {
             .await
             .map_err(TransportError::stream)?;
         Ok(BulkStream::new(send, recv))
+    }
+
+    // -------------------------------------------------------------- cursor
+
+    /// Open the cursor stream. The **host** side, protocol version 3.
+    ///
+    /// A one-way stream from host to viewer, so cursor traffic never shares a
+    /// stream with request/response control messages, whose replies are paired
+    /// with their requests by order. Like every QUIC stream it is not visible to
+    /// the peer until the first write.
+    pub async fn open_cursor(&self) -> Result<CursorSender> {
+        let send = self
+            .connection
+            .open_uni()
+            .await
+            .map_err(TransportError::stream)?;
+        Ok(CursorSender::new(send))
+    }
+
+    /// Accept the cursor stream. The **viewer** side.
+    pub async fn accept_cursor(&self) -> Result<CursorReceiver> {
+        let recv = self
+            .connection
+            .accept_uni()
+            .await
+            .map_err(TransportError::stream)?;
+        Ok(CursorReceiver::new(recv))
     }
 
     // --------------------------------------------------------------- media

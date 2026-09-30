@@ -38,6 +38,7 @@
 
 pub mod bulk;
 pub mod control;
+pub mod cursor;
 pub mod endpoint;
 pub mod error;
 pub mod peer;
@@ -45,6 +46,7 @@ pub mod session;
 
 pub use bulk::BulkStream;
 pub use control::{ClientControl, HostControl};
+pub use cursor::{CursorReceiver, CursorSender};
 pub use endpoint::{Reachability, Transport, ALPN};
 pub use error::{Result, TransportError};
 pub use peer::{PeerAddress, PeerKey};

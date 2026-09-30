@@ -13,6 +13,10 @@ pravera-capture.workspace = true
 pravera-files.workspace = true
 pravera-codec.workspace = true
 pravera-host.workspace = true
+# The keyboard hook has to recognise what the host half injected on this machine
+# (`pravera_input::INJECTION_TAG`), and `net::keys` is tested against the same
+# scan-code table.
+pravera-input.workspace = true
 pravera-proto.workspace = true
 pravera-term.workspace = true
 pravera-transport.workspace = true
@@ -65,12 +69,6 @@ winres = "0.1"
 resvg = { version = "0.44", default-features = false, features = ["text"] }
 tiny-skia = "0.11"
 ico = "0.4"
-
-[dev-dependencies]
-# The keyboard table in `net::keys` and the scan-code table in `pravera-input`
-# describe the same keys from opposite ends. A test asserts they agree, which
-# is the only reason the client links the host's input crate at all.
-pravera-input.workspace = true
 
 [lib]
 name = "pravera_ui"

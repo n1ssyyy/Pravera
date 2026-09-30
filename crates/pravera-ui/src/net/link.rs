@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pravera_client::{
-    AudioSink, AudioStats, AudioStream, Client, ClientConfig, ClientError, VideoStats, VideoStream,
+    AudioSink, AudioStats, AudioStream, Client, ClientConfig, ClientError, CursorState,
+    CursorStream, VideoStats, VideoStream,
 };
 use pravera_core::{DeviceId, Permission, QualityProfile, Resolution};
 use pravera_proto::{InputEvent, Monitor, MonitorId, SessionConfig};
@@ -171,6 +172,10 @@ pub struct Link {
     /// a second one.
     session: Session,
     video: Arc<VideoStream>,
+    /// The host's cursor, sent apart from the picture. `None` for a host older
+    /// than protocol version 3, which draws its cursor into the picture and has
+    /// nothing else to say about it.
+    cursor: Option<CursorStream>,
     /// Playback, if the host agreed to send sound and this machine could open
     /// a device to hear it on.
     ///
@@ -212,6 +217,18 @@ impl Link {
 
     pub fn config(&self) -> &SessionConfig {
         &self.config
+    }
+
+    /// The host's cursor as last reported, with a serial that changes when it
+    /// does. `None` when the host sends none, has not yet, or has stopped, and
+    /// in every one of those cases the viewer's own cursor is the right thing
+    /// to show.
+    pub fn remote_cursor(&self) -> Option<(u64, CursorState)> {
+        let cursor = self.cursor.as_ref()?;
+        if cursor.has_ended() {
+            return None;
+        }
+        cursor.latest()
     }
 
     /// What playback has done, if this session has sound.
@@ -384,6 +401,9 @@ pub async fn connect(
     let sink = audio.as_ref().map(|stream| stream.sink());
 
     let video = Arc::new(client.video(sink.clone()).map_err(describe)?);
+    // Read from the moment the host starts sending: the stream opens when the
+    // host's session starts, which has just happened.
+    let cursor = client.cursor();
 
     // A role without `MULTI_MONITOR` is refused the list, and that refusal is
     // not a reason to abandon a session that is otherwise working. An empty
@@ -416,6 +436,7 @@ pub async fn connect(
             commands,
             session: client_session,
             video,
+            cursor,
             audio,
             wanted_audio: credentials.audio,
             config,

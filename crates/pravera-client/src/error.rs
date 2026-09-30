@@ -128,5 +128,7 @@ pub(crate) fn describe(message: &pravera_proto::HostMessage) -> &'static str {
         M::SasSent => "SasSent",
         M::Failed(_) => "Failed",
         M::Goodbye { .. } => "Goodbye",
+        M::CursorShape { .. } => "CursorShape",
+        M::Cursor { .. } => "Cursor",
     }
 }

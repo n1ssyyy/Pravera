@@ -32,6 +32,8 @@
 //! see the mouse move — that is the `SendInput` ceiling recorded in the plan,
 //! and it is a host-side limit rather than anything this screen can fix.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::keyboard::key::Physical;
@@ -48,6 +50,7 @@ use crate::motion;
 use crate::net::keys;
 use crate::net::link::{Command, Link};
 use crate::theme::{self, tokens as t};
+use crate::widget::remote_cursor::{self, Remote, Shape};
 use crate::widget::video::{point_in, Picture, Video};
 
 /// How long the toolbar stays up after something happens that the person
@@ -187,7 +190,21 @@ pub struct State {
     gaming: bool,
     /// Set when gaming mode was toggled, and taken by the application.
     gaming_request: Option<bool>,
+
+    /// The host's cursor as last reported, drawn over the picture. `None` for a
+    /// host that sends none, and then nothing here changes anything.
+    remote: Option<Remote>,
+    /// The serial of `remote`, so an unchanged report is not rebuilt.
+    remote_serial: u64,
+    /// Cursor images built into drawable handles, by the host's id for them.
+    /// Ids are never reused within a session, so an entry is never stale, and
+    /// the whole cache goes with the session.
+    shapes: HashMap<u32, Arc<Shape>>,
 }
+
+/// Cursor images kept before the cache is emptied. The host resends a shape
+/// that falls out of it, so this is a memory bound and nothing more.
+const SHAPE_CACHE: usize = 128;
 
 impl Default for State {
     fn default() -> Self {
@@ -217,6 +234,9 @@ impl Default for State {
             last_seen: None,
             gaming: false,
             gaming_request: None,
+            remote: None,
+            remote_serial: 0,
+            shapes: HashMap::new(),
         }
     }
 }
@@ -262,6 +282,68 @@ impl State {
     /// A newly decoded frame.
     pub fn show(&mut self, picture: Picture) {
         self.picture = Some(picture);
+    }
+
+    /// Read the host's cursor, once per redraw.
+    ///
+    /// The frame subscription runs for as long as a picture is in front, so a
+    /// cursor that moves over a desktop that does not is picked up on the next
+    /// frame without a message of its own.
+    pub fn follow_cursor(&mut self, link: &Link) {
+        let Some((serial, reported)) = link.remote_cursor() else {
+            // Nothing sent, or it stopped: the viewer's own cursor takes over.
+            self.remote = None;
+            self.remote_serial = 0;
+            return;
+        };
+        if self.remote.is_some() && serial == self.remote_serial {
+            return;
+        }
+        self.remote_serial = serial;
+
+        let shape = reported.image.as_ref().map(|image| {
+            if let Some(known) = self.shapes.get(&image.id) {
+                return known.clone();
+            }
+            if self.shapes.len() >= SHAPE_CACHE {
+                self.shapes.clear();
+            }
+            let built = Arc::new(Shape {
+                handle: iced::widget::image::Handle::from_rgba(
+                    u32::from(image.width),
+                    u32::from(image.height),
+                    image.rgba.clone(),
+                ),
+                width: image.width,
+                height: image.height,
+                hot_x: image.hot_x,
+                hot_y: image.hot_y,
+            });
+            self.shapes.insert(image.id, built.clone());
+            built
+        });
+        self.remote = Some(Remote {
+            x: reported.x,
+            y: reported.y,
+            visible: reported.visible,
+            shape,
+        });
+    }
+
+    /// Whether the viewer's own cursor is replaced by the host's over the
+    /// picture.
+    ///
+    /// Only while controlling: the host's cursor is drawn where the hand is,
+    /// so the two must not both show. Watching without control leaves the local
+    /// pointer alone, because it is the viewer's own and there is no hand on
+    /// the host to follow. Gaming mode always hides it, as it did before there
+    /// was anything to replace it with.
+    ///
+    /// False whenever there is nothing to draw, which is the fallback: a host
+    /// that hid its cursor, or one that has not sent one yet, leaves the
+    /// viewer's arrow visible rather than nothing at all.
+    fn replaces_local_cursor(&self, can_control: bool) -> bool {
+        self.gaming || (can_control && self.remote.as_ref().is_some_and(Remote::is_drawable))
     }
 
     /// A control round-trip completed.
@@ -590,15 +672,33 @@ pub fn view<'a>(state: &'a State, link: &'a Link, now: Instant) -> Element<'a, M
     let showing = state.showing(now);
 
     let surface: Element<'_, Message> = match &state.picture {
-        Some(picture) => shader(Surface {
-            video: Video::new(picture.clone()),
-            resolution: picture.resolution,
-            keyboard: state.keyboard,
-            hide_cursor: state.gaming,
-        })
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into(),
+        Some(picture) => {
+            let control = link.can_control();
+            let picture_widget: Element<'_, Message> = shader(Surface {
+                video: Video::new(picture.clone()),
+                resolution: picture.resolution,
+                keyboard: state.keyboard,
+                hide_cursor: state.replaces_local_cursor(control),
+            })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+            match &state.remote {
+                // The host's cursor over the picture. A layer that takes no
+                // events and reports no interaction, so everything below it
+                // behaves exactly as it does without it.
+                Some(remote) => stack![
+                    picture_widget,
+                    remote_cursor::layer(remote_cursor::Layer {
+                        picture: picture.resolution,
+                        remote: Some(remote.clone()),
+                        follow_local: control && !state.gaming,
+                    })
+                ]
+                .into(),
+                None => picture_widget,
+            }
+        }
         None => waiting(state, link, now),
     };
 
@@ -1364,8 +1464,9 @@ struct Surface {
     /// forwarded; the keyboard is the one that has to be lent back so the
     /// person can use their own machine.
     keyboard: bool,
-    /// Whether the local pointer disappears over the picture. Only in gaming
-    /// mode, where the pointer is confined and the game draws its own.
+    /// Whether the local pointer disappears over the picture: in gaming mode,
+    /// where it is confined and the game draws its own, and while the host's
+    /// cursor is being drawn in its place (`State::replaces_local_cursor`).
     hide_cursor: bool,
 }
 
@@ -1506,14 +1607,14 @@ impl shader::Program<Message> for Surface {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        // The host composites its cursor into the picture when Windows is
-        // drawing one, but a host with no mouse attached (a headless box on a
-        // virtual display) has none to draw, a view-only session never moves
-        // it, and an elevated window on the host refuses to. Hiding the local
-        // arrow on the strength of a cursor that may not be there left people
-        // with no pointer at all. A second arrow that trails the first by a
-        // frame is the lesser problem, until the host sends its cursor's shape
-        // and the viewer draws it.
+        // Hiding the local arrow is only safe when something else is drawing
+        // the pointer. A host older than protocol version 3 composites its
+        // cursor into the picture only when Windows is drawing one (not on a
+        // headless box with no mouse, not in a view-only session, not over an
+        // elevated window), and hiding the arrow on the strength of a cursor
+        // that may not be there left people with no pointer at all. So this is
+        // set only in gaming mode, and once the host has sent a cursor the
+        // viewer is actually drawing.
         match cursor
             .position()
             .and_then(|p| point_in(bounds, self.resolution, p))
@@ -2271,5 +2372,68 @@ mod tests {
         for figure in ["7", "2", "1"] {
             assert!(detail.contains(figure), "{figure} missing from {detail}");
         }
+    }
+
+    fn remote(visible: bool, drawable_shape: bool) -> Remote {
+        Remote {
+            x: 10,
+            y: 10,
+            visible,
+            shape: drawable_shape.then(|| {
+                Arc::new(Shape {
+                    handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0u8; 4]),
+                    width: 1,
+                    height: 1,
+                    hot_x: 0,
+                    hot_y: 0,
+                })
+            }),
+        }
+    }
+
+    #[test]
+    fn a_host_that_sends_no_cursor_leaves_the_local_one_alone() {
+        // Protocol version 2 hosts, and version 3 ones before their first
+        // shape: exactly the behaviour before the host's cursor was drawn.
+        let state = State::default();
+        assert!(!state.replaces_local_cursor(true));
+        assert!(!state.replaces_local_cursor(false));
+    }
+
+    fn with_remote(remote: Remote) -> State {
+        State {
+            remote: Some(remote),
+            ..State::default()
+        }
+    }
+
+    #[test]
+    fn while_controlling_the_hosts_cursor_replaces_the_local_one() {
+        let state = with_remote(remote(true, true));
+        assert!(state.replaces_local_cursor(true));
+    }
+
+    #[test]
+    fn a_view_only_login_keeps_its_own_cursor() {
+        let state = with_remote(remote(true, true));
+        assert!(!state.replaces_local_cursor(false));
+    }
+
+    #[test]
+    fn a_cursor_the_host_hid_gives_the_local_one_back() {
+        assert!(!with_remote(remote(false, true)).replaces_local_cursor(true));
+        // A position naming a shape that never arrived is the same.
+        assert!(!with_remote(remote(true, false)).replaces_local_cursor(true));
+    }
+
+    #[test]
+    fn gaming_mode_hides_the_local_cursor_whatever_the_host_says() {
+        let state = State {
+            gaming: true,
+            remote: Some(remote(false, false)),
+            ..State::default()
+        };
+        assert!(state.replaces_local_cursor(false));
+        assert!(state.replaces_local_cursor(true));
     }
 }

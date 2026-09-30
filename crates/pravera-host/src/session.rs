@@ -237,6 +237,9 @@ pub struct HostSession<S: UserStore> {
     /// Codecs both ends have, best first. Empty until `Hello`.
     shared_codecs: Vec<Codec>,
     attempts: u32,
+    /// The protocol version this connection was negotiated at. What `Hello`
+    /// must carry and what `Welcome` answers with.
+    version: u16,
 }
 
 impl<S: UserStore> HostSession<S> {
@@ -248,7 +251,20 @@ impl<S: UserStore> HostSession<S> {
             stage: Stage::Greeting,
             shared_codecs: Vec::new(),
             attempts: 0,
+            version: VERSION,
         }
+    }
+
+    /// Pin the protocol version this connection speaks, as negotiated by the
+    /// transport. Defaults to the newest, which is right for a session with no
+    /// transport under it; `serve` sets it from the connection's ALPN.
+    pub fn set_version(&mut self, version: u16) {
+        self.version = version;
+    }
+
+    /// The protocol version this connection speaks.
+    pub fn version(&self) -> u16 {
+        self.version
     }
 
     /// The device on the other end, proven by the TLS handshake.
@@ -325,13 +341,13 @@ impl<S: UserStore> HostSession<S> {
             return Response::refuse(ProtocolError::OutOfOrder);
         }
 
-        if hello.version != VERSION {
+        if hello.version != self.version {
             // Both numbers are safe to disclose; the ALPN already carried ours
             // in cleartext during the TLS handshake.
             warn!(peer = %self.peer, theirs = hello.version, "protocol version mismatch");
             self.stage = Stage::Ended;
             return Response::fatal(ProtocolError::VersionMismatch {
-                ours: VERSION,
+                ours: self.version,
                 theirs: hello.version,
             });
         }
@@ -352,7 +368,7 @@ impl<S: UserStore> HostSession<S> {
         self.stage = Stage::Login;
 
         Response::reply(HostMessage::Welcome(Welcome {
-            version: VERSION,
+            version: self.version,
             host_name: self.config.host_name.clone(),
             // The intersection rather than the full list. It is a subset of
             // what this host has, so it is not a lie, and it saves the client

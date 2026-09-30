@@ -34,6 +34,7 @@ use pravera_proto::{ClipboardUpdate, InputEvent, MonitorId, SessionConfig};
 use tracing::{debug, info, warn};
 
 use crate::audio::AudioStreamer;
+use crate::cursor::{CursorFeed, CursorSource, Geometry};
 use crate::media::{screen_for, StreamStats, Streamer};
 use crate::{ClipboardAnswer, ClipboardAsk, SessionHooks};
 use pravera_transport::Session;
@@ -100,6 +101,13 @@ pub struct Agent {
     /// Set once the clipboard has been tried and would not open, so a client
     /// polling twice a second does not retry a failing platform call forever.
     clipboard_unavailable: bool,
+    /// Where the pointer is read from, until the first stream starts and it
+    /// moves into `cursor`. Only present for a viewer that draws the cursor
+    /// itself, which is to say protocol version 3 or later.
+    cursor_source: Option<Box<dyn CursorSource>>,
+    /// The running cursor feed. While one exists the picture is captured
+    /// without the cursor in it, because the viewer draws its own.
+    cursor: Option<CursorFeed>,
 }
 
 impl Agent {
@@ -132,6 +140,7 @@ impl Agent {
         source: Arc<dyn CaptureSource>,
         input: Box<dyn InputSink>,
     ) -> Agent {
+        let session_version = session.protocol_version();
         Agent {
             session,
             source,
@@ -146,7 +155,25 @@ impl Agent {
             inject_logs: 0,
             clipboard: None,
             clipboard_unavailable: false,
+            cursor_source: None,
+            cursor: None,
         }
+        .with_cursor_source(
+            (session_version >= pravera_proto::CURSOR_VERSION)
+                .then(crate::cursor::system_source)
+                .flatten(),
+        )
+    }
+
+    /// Use this source for the host's cursor instead of the platform's. `None`
+    /// turns the cursor feed off, and the cursor is drawn into the picture as it
+    /// always was. The seam tests use, so that a test does not depend on where
+    /// the developer's mouse is.
+    pub fn with_cursor_source(mut self, source: Option<Box<dyn CursorSource>>) -> Agent {
+        self.cursor_source = source.filter(|_| {
+            self.session.protocol_version() >= pravera_proto::CURSOR_VERSION
+        });
+        self
     }
 
     pub fn stats(&self) -> AgentStats {
@@ -194,6 +221,7 @@ impl Agent {
         if let Some(mut audio) = self.audio.take() {
             audio.stop();
         }
+        self.cursor = None;
     }
 
     /// Stop only the picture, leaving any audio running.
@@ -317,7 +345,28 @@ impl SessionHooks for Agent {
 
         self.hear(config.audio);
 
-        match Streamer::start(self.session.clone(), self.source.clone(), config) {
+        // The viewer draws the cursor when there is a feed to draw it from. Only
+        // then is it left out of the picture: a version 2 viewer, or a platform
+        // with no cursor source, still gets it embedded.
+        let geometry = Geometry {
+            screen: self.screen,
+            picture: config.format.resolution,
+        };
+        match (&self.cursor, self.cursor_source.take()) {
+            (Some(feed), _) => feed.set_geometry(geometry),
+            (None, Some(source)) => {
+                self.cursor = Some(CursorFeed::start(self.session.clone(), source, geometry));
+            }
+            (None, None) => {}
+        }
+        let embed_cursor = self.cursor.is_none();
+
+        match Streamer::start(
+            self.session.clone(),
+            self.source.clone(),
+            config,
+            embed_cursor,
+        ) {
             Ok(streamer) => {
                 self.stats.streams_started += 1;
                 self.streamer = Some(streamer);

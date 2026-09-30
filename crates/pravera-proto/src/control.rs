@@ -548,6 +548,73 @@ pub enum HostMessage {
     Goodbye {
         reason: String,
     },
+    /// A cursor image, sent once per distinct shape. Protocol version 3 and up,
+    /// on the cursor stream (see [`crate::CURSOR_VERSION`]).
+    ///
+    /// Shapes are sent separately from positions because a position changes
+    /// hundreds of times a second and a shape a few times a minute: the image
+    /// is sent when it first appears and named by `id` afterwards.
+    CursorShape {
+        /// What [`HostMessage::Cursor::shape`] refers to. Ids are chosen by the
+        /// host and never reused for a different image within one session.
+        id: u32,
+        width: u16,
+        height: u16,
+        /// The pixel of the image that sits on the pointer position.
+        hot_x: u16,
+        hot_y: u16,
+        /// Straight (not premultiplied) RGBA, `width * height * 4` bytes.
+        rgba: Vec<u8>,
+    },
+    /// Where the host's pointer is, and which shape it wears. Protocol version
+    /// 3 and up, on the cursor stream.
+    ///
+    /// The position is in the pixels of the streamed display, the same space
+    /// [`InputEvent::PointerMove`] uses in the other direction, so a viewer maps
+    /// it with the same letterbox arithmetic it uses for its own pointer. A
+    /// pointer that is on another display, or that an application has hidden, is
+    /// `visible: false`.
+    Cursor {
+        x: i32,
+        y: i32,
+        visible: bool,
+        shape: u32,
+    },
+}
+
+/// The largest cursor image edge that will be sent.
+///
+/// Cursors are 32 to 64 pixels in practice; the largest accessibility ones are
+/// around 128 and are scaled down by the host. The cap is what makes a shape
+/// safe to allocate against.
+pub const MAX_CURSOR_EDGE: u16 = 96;
+
+impl HostMessage {
+    /// Whether this message is internally consistent enough to use.
+    ///
+    /// Checked on the client for the messages whose sizes it allocates or
+    /// indexes by. Everything else is `true`.
+    pub fn is_well_formed(&self) -> bool {
+        match self {
+            HostMessage::CursorShape {
+                width,
+                height,
+                hot_x,
+                hot_y,
+                rgba,
+                ..
+            } => {
+                *width > 0
+                    && *height > 0
+                    && *width <= MAX_CURSOR_EDGE
+                    && *height <= MAX_CURSOR_EDGE
+                    && hot_x < width
+                    && hot_y < height
+                    && rgba.len() == usize::from(*width) * usize::from(*height) * 4
+            }
+            _ => true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -866,6 +933,20 @@ mod tests {
             },
             HostMessage::Pong { nonce: 7 },
             HostMessage::TerminalStarted,
+            HostMessage::CursorShape {
+                id: 3,
+                width: 2,
+                height: 1,
+                hot_x: 1,
+                hot_y: 0,
+                rgba: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            },
+            HostMessage::Cursor {
+                x: -5,
+                y: 1080,
+                visible: true,
+                shape: 3,
+            },
             HostMessage::Failed(ProtocolError::PermissionDenied),
             HostMessage::Pong { nonce: 7 },
         ];
@@ -969,5 +1050,46 @@ mod tests {
             password: "hunter2-but-longer".into(),
         };
         assert_eq!(round_trip(&creds), creds);
+    }
+
+    fn shape(width: u16, height: u16, hot: (u16, u16), len: usize) -> HostMessage {
+        HostMessage::CursorShape {
+            id: 1,
+            width,
+            height,
+            hot_x: hot.0,
+            hot_y: hot.1,
+            rgba: vec![0; len],
+        }
+    }
+
+    #[test]
+    fn a_consistent_cursor_shape_is_well_formed() {
+        assert!(shape(32, 32, (0, 0), 32 * 32 * 4).is_well_formed());
+        assert!(shape(96, 96, (95, 95), 96 * 96 * 4).is_well_formed());
+    }
+
+    #[test]
+    fn inconsistent_cursor_shapes_are_rejected() {
+        // Wrong buffer length, oversize, empty, hotspot outside the image.
+        assert!(!shape(32, 32, (0, 0), 32 * 32 * 4 - 1).is_well_formed());
+        assert!(!shape(32, 32, (0, 0), 32 * 32 * 4 + 4).is_well_formed());
+        assert!(!shape(97, 1, (0, 0), 97 * 4).is_well_formed());
+        assert!(!shape(0, 4, (0, 0), 0).is_well_formed());
+        assert!(!shape(4, 4, (4, 0), 64).is_well_formed());
+        assert!(!shape(4, 4, (0, 4), 64).is_well_formed());
+        // Sizes whose product overflows a u16 must not wrap into "valid".
+        assert!(!shape(u16::MAX, u16::MAX, (0, 0), 0).is_well_formed());
+    }
+
+    #[test]
+    fn cursor_moves_are_always_well_formed() {
+        let moved = HostMessage::Cursor {
+            x: i32::MIN,
+            y: i32::MAX,
+            visible: false,
+            shape: 9,
+        };
+        assert!(moved.is_well_formed());
     }
 }

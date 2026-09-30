@@ -220,6 +220,7 @@ impl Streamer {
         session: Session,
         source: Arc<dyn CaptureSource>,
         config: &SessionConfig,
+        embed_cursor: bool,
     ) -> Result<Streamer> {
         // Headless: a box with no monitor has nothing to capture but Windows'
         // placeholders (a desktop nothing composes to, or the `Generic
@@ -257,7 +258,7 @@ impl Streamer {
         // counter, at the cost of a full-screen copy each.
         let options = CaptureOptions {
             format: PixelFormat::Bgra8,
-            cursor: true,
+            cursor: embed_cursor,
             max_fps: Some(settings.fps),
             damage: config.profile.uses_damage_regions(),
         };
@@ -330,6 +331,7 @@ impl Streamer {
                         settings,
                         scaler,
                         monitor,
+                        embed_cursor,
                         stop,
                         keyframe,
                         counters,
@@ -410,6 +412,9 @@ struct Pipeline {
     settings: EncoderSettings,
     scaler: Option<Scaler>,
     monitor: MonitorId,
+    /// Whether the host's cursor is drawn into the picture. False when the
+    /// viewer draws it itself from the cursor stream.
+    embed_cursor: bool,
     stop: Arc<AtomicBool>,
     keyframe: Arc<AtomicBool>,
     counters: Arc<Counters>,
@@ -532,7 +537,7 @@ fn run(mut pipeline: Pipeline) {
                                     );
                                     let opts = pravera_capture::CaptureOptions {
                                         format: pravera_core::PixelFormat::Bgra8,
-                                        cursor: true,
+                                        cursor: pipeline.embed_cursor,
                                         max_fps: Some(60),
                                         damage: false,
                                     };

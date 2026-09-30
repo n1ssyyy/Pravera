@@ -56,7 +56,7 @@ pub use codec::{
 pub use control::{
     AuthResult, ClientMessage, ClipboardSeq, ClipboardUpdate, Credentials, Hello, HostMessage,
     InputEvent, KeyCode, Monitor, MonitorId, PointerButton, SessionConfig, SessionRequest, Welcome,
-    MAX_CLIPBOARD_BYTES, MAX_TEXT_BYTES,
+    MAX_CLIPBOARD_BYTES, MAX_CURSOR_EDGE, MAX_TEXT_BYTES,
 };
 pub use error::{ProtocolError, Result};
 pub use files::{
@@ -71,21 +71,47 @@ pub use terminal::{
     TerminalIn, TerminalOut, MAX_COLUMNS, MAX_INPUT_CHUNK, MAX_OUTPUT_CHUNK, MAX_ROWS,
 };
 
-/// The protocol version.
+/// The protocol version this build speaks natively.
 ///
 /// Bumped on any change that alters the shape of a message. Because postcard
 /// does not transmit field names, a peer speaking a different version does not
-/// fail cleanly: it silently misreads one field as another. There is no partial
-/// compatibility to be had, so [`Hello`] carries this and the host refuses
-/// anything that does not match exactly.
-pub const VERSION: u16 = 2;
+/// fail cleanly: it silently misreads one field as another. So [`Hello`] carries
+/// the version and the host refuses anything that does not match the version
+/// negotiated for the connection.
+///
+/// Version 3 only *adds* things: two [`HostMessage`] variants at the end of the
+/// enum, carried on a stream that version 2 never opens. A version 3 build can
+/// therefore speak version 2 exactly, which is why [`MIN_VERSION`] exists and
+/// why both versions have an ALPN: the version is picked by the TLS handshake,
+/// once, and then every message on the connection is that version's.
+pub const VERSION: u16 = 3;
 
-/// ALPN identifier negotiated during the TLS handshake.
+/// The oldest version this build still speaks.
+pub const MIN_VERSION: u16 = 2;
+
+/// The first version in which the host sends its cursor to the viewer
+/// ([`HostMessage::CursorShape`], [`HostMessage::Cursor`]).
+pub const CURSOR_VERSION: u16 = 3;
+
+/// ALPN identifier of the newest version.
 ///
 /// Carries the version too, so a mismatched peer is rejected by QUIC before a
 /// single application byte is exchanged. [`Hello`] checks it a second time
 /// because the ALPN only proves what the peer *claims* to speak.
-pub const ALPN: &[u8] = b"pravera/2";
+pub const ALPN: &[u8] = b"pravera/3";
+
+/// ALPN identifier of version 2, still accepted and still offered.
+pub const ALPN_V2: &[u8] = b"pravera/2";
+
+/// Every ALPN this build accepts, newest first.
+pub const ALPNS: &[&[u8]] = &[ALPN, ALPN_V2];
+
+/// The protocol version an ALPN names, if it is one this build speaks.
+pub fn version_of_alpn(alpn: &[u8]) -> Option<u16> {
+    let text = std::str::from_utf8(alpn).ok()?;
+    let version: u16 = text.strip_prefix("pravera/")?.parse().ok()?;
+    (MIN_VERSION..=VERSION).contains(&version).then_some(version)
+}
 
 #[cfg(test)]
 mod tests {
@@ -95,9 +121,17 @@ mod tests {
     fn the_alpn_names_the_version_it_carries() {
         // If these drift, two incompatible builds would complete a TLS
         // handshake and only fail later, deep in a misparsed message.
-        let alpn = std::str::from_utf8(ALPN).expect("ALPN must be printable");
-        let (name, version) = alpn.split_once('/').expect("ALPN must be name/version");
-        assert_eq!(name, "pravera");
-        assert_eq!(version.parse::<u16>().unwrap(), VERSION);
+        assert_eq!(version_of_alpn(ALPN), Some(VERSION));
+        assert_eq!(version_of_alpn(ALPN_V2), Some(MIN_VERSION));
+        assert_eq!(ALPNS[0], ALPN, "newest first, so it is the one preferred");
+    }
+
+    #[test]
+    fn foreign_alpns_name_no_version() {
+        assert_eq!(version_of_alpn(b"pravera/1"), None);
+        assert_eq!(version_of_alpn(b"pravera/4"), None);
+        assert_eq!(version_of_alpn(b"pravera/x"), None);
+        assert_eq!(version_of_alpn(b"h3"), None);
+        assert_eq!(version_of_alpn(&[0xff, 0xfe]), None);
     }
 }

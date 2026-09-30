@@ -342,3 +342,60 @@ async fn a_peer_hanging_up_is_reported_as_a_closed_stream_not_a_failure() {
 
     host_task.await.expect("the host task panicked");
 }
+
+#[tokio::test]
+async fn two_current_builds_negotiate_the_newest_version() {
+    let host = bind().await;
+    let client = bind().await;
+    let (host_side, client_side) = connected(&host, &client).await;
+
+    assert_eq!(host_side.protocol_version(), pravera_proto::VERSION);
+    assert_eq!(client_side.protocol_version(), pravera_proto::VERSION);
+}
+
+#[tokio::test]
+async fn a_current_client_falls_back_to_a_host_that_only_speaks_version_two() {
+    // One handshake, no retry: the client offers both ALPNs and the host picks.
+    let host = Transport::bind_up_to(&Identity::generate(), Reachability::LocalOnly, 2)
+        .await
+        .expect("binding an old-style host");
+    let client = bind().await;
+    let (host_side, client_side) = connected(&host, &client).await;
+
+    assert_eq!(host_side.protocol_version(), 2);
+    assert_eq!(client_side.protocol_version(), 2);
+}
+
+#[tokio::test]
+async fn cursor_messages_cross_on_their_own_stream_in_order() {
+    let host = bind().await;
+    let client = bind().await;
+    let (host_side, client_side) = connected(&host, &client).await;
+
+    let shape = HostMessage::CursorShape {
+        id: 1,
+        width: 2,
+        height: 2,
+        hot_x: 0,
+        hot_y: 1,
+        rgba: vec![9; 16],
+    };
+    let moved = HostMessage::Cursor {
+        x: 10,
+        y: -3,
+        visible: true,
+        shape: 1,
+    };
+
+    let mut sender = within("opening the cursor stream", host_side.open_cursor())
+        .await
+        .expect("open");
+    sender.send(&shape).await.expect("send shape");
+    sender.send(&moved).await.expect("send move");
+
+    let mut receiver = within("accepting the cursor stream", client_side.accept_cursor())
+        .await
+        .expect("accept");
+    assert_eq!(within("shape", receiver.recv()).await.expect("shape"), shape);
+    assert_eq!(within("move", receiver.recv()).await.expect("move"), moved);
+}
