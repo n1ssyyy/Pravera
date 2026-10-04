@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pravera: the remote desktop that shows you the route</title>
+<meta name="description" content="Pravera is a free, open-source remote desktop. It finds the fastest path between your machines (a cable, the same network, a tailnet, a punched hole) and draws that route live. No account, no subscription, no middleman.">
+<meta name="theme-color" content="#0a0a0a">
+<meta property="og:title" content="Pravera: stop routing your screen through someone else's cloud">
+<meta property="og:description" content="The open-source remote desktop that finds the fastest path between your machines and shows it to you. Free. No account. No subscription. No middleman.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Pravera">
+<meta property="og:url" content="https://pravera.vercel.app/">
+<meta property="og:image" content="https://pravera.vercel.app/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Pravera. Stop routing your screen through someone else's cloud. A direct route drawn in green under a relay detour left behind.">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="canonical" href="https://pravera.vercel.app/">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/JetBrainsMono-Variable.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="stylesheet" href="site.css">
+<script>document.documentElement.classList.add('js');</script>
+</head>
+<body id="top">
+
+<!-- Icons: Pravera's own set (crates/pravera-ui/src/icon.rs), a 16 grid with
+     a 1.5 stroke. The three the app has no use for (a heart, a clock, a link
+     leaving the page) are drawn to the same rules. Then the five route meters
+     as the app draws them (components/route_meter.rs). The mark and the
+     GitHub glyph are fills. -->
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-devices" viewBox="0 0 16 16"><rect x="1.75" y="2.5" width="12.5" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11v3"/></symbol>
+  <symbol id="i-relay" viewBox="0 0 16 16"><circle cx="2.75" cy="11.5" r="1.5"/><circle cx="13.25" cy="11.5" r="1.5"/><circle cx="8" cy="3.5" r="1.5"/><path d="M3.85 10.4 6.9 4.65M9.1 4.65l3.05 5.75"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 16 16"><path d="M8 1.5 13.5 3.75v4C13.5 11 11.1 13.7 8 14.5 4.9 13.7 2.5 11 2.5 7.75v-4Z"/><path d="M5.75 7.75 7.25 9.25l3-3"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 16 16"><rect x="2" y="2" width="4.75" height="4.75" rx="1"/><rect x="9.25" y="2" width="4.75" height="4.75" rx="1"/><rect x="2" y="9.25" width="4.75" height="4.75" rx="1"/><path d="M11.625 9.5v4.25M9.5 11.625h4.25"/></symbol>
+  <symbol id="i-transfers" viewBox="0 0 16 16"><path d="M4.75 13.25V3.25"/><path d="M2.25 5.75 4.75 3.25l2.5 2.5"/><path d="M11.25 2.75v10"/><path d="M13.75 10.25l-2.5 2.5-2.5-2.5"/></symbol>
+  <symbol id="i-history" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25"/><path d="M8 4.5V8l2.25 1.5"/></symbol>
+  <symbol id="i-download" viewBox="0 0 16 16"><path d="M8 1.75v8.5"/><path d="M4.75 7.25 8 10.5l3.25-3.25"/><path d="M2.5 13.25h11"/></symbol>
+  <symbol id="i-cable" viewBox="0 0 16 16"><path d="M6.6 9.4a2.9 2.9 0 0 0 4.3.3l1.9-1.9a2.9 2.9 0 1 0-4.1-4.1l-1.1 1.1"/><path d="M9.4 6.6a2.9 2.9 0 0 0-4.3-.3L3.2 8.2a2.9 2.9 0 1 0 4.1 4.1l1.1-1.1"/></symbol>
+  <symbol id="i-wireless" viewBox="0 0 16 16"><path d="M1.5 6.25a9.5 9.5 0 0 1 13 0"/><path d="M4.25 9a5.75 5.75 0 0 1 7.5 0"/><path d="M6.9 11.75a2 2 0 0 1 2.2 0"/><path d="M8 13.5h.01"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25"/><path d="M1.75 8h12.5"/><ellipse cx="8" cy="8" rx="3.1" ry="6.25"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="6.5" rx="1.5"/><path d="M5.5 7V5.25a2.5 2.5 0 0 1 5 0V7"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 16 16"><rect x="1" y="3.75" width="14" height="8.5" rx="1.5"/><path d="M4.25 6.5h.01M7 6.5h.01M9.75 6.5h.01M12.5 6.5h.01M4.25 9h.01M12.5 9h.01"/><path d="M6.5 9.5h3"/></symbol>
+  <symbol id="i-speaker" viewBox="0 0 16 16"><path d="M7.5 2.75 4 5.75H1.75v4.5H4l3.5 3Z"/><path d="M10.25 6a2.75 2.75 0 0 1 0 4"/><path d="M12.5 3.75a6 6 0 0 1 0 8.5"/></symbol>
+  <symbol id="i-sidebar" viewBox="0 0 16 16"><rect x="1.75" y="2.5" width="12.5" height="11" rx="1.5"/><path d="M6.25 2.5v11"/></symbol>
+  <symbol id="i-agent" viewBox="0 0 16 16"><rect x="1.75" y="3" width="12.5" height="10" rx="1.5"/><path d="M6.5 8 4.5 10 6.5 12"/><path d="M9.5 8 11.5 10 9.5 12"/></symbol>
+  <symbol id="i-gamepad" viewBox="0 0 16 16"><rect x="1.75" y="4.5" width="12.5" height="7" rx="3.5"/><path d="M5.5 6.5v3M4 8h3"/><circle cx="10.25" cy="7.25" r="0.75"/><circle cx="12" cy="9" r="0.75"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 16 16"><path d="M9 1.5 3.5 9h4L7 14.5 12.5 7h-4Z"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 16 16"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5"/><path d="M4.25 6 6.5 8l-2.25 2M8.25 10.25h3.5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 16 16"><path d="M3.25 8.5 6.5 11.75l6.25-7"/></symbol>
+  <symbol id="i-close" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 16 16"><path d="M3.75 6.25 8 10.5l4.25-4.25"/></symbol>
+  <symbol id="i-out" viewBox="0 0 16 16"><path d="M6 3.5h6.5V10"/><path d="M12.5 3.5 3.5 12.5"/></symbol>
+  <symbol id="i-scan" viewBox="0 0 16 16"><path d="M13.25 8a5.25 5.25 0 1 1-1.6-3.78"/><path d="M13.25 2.5v3h-3"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 16 16"><path d="M8 13.25 2.9 8.3a3.1 3.1 0 0 1 4.4-4.4L8 4.6l.7-.7a3.1 3.1 0 0 1 4.4 4.4Z"/></symbol>
+  <symbol id="i-github" viewBox="0 0 24 24"><path class="solid" d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></symbol>
+  <symbol id="i-mark" viewBox="14 14 36 36"><g transform="translate(32 32) scale(0.028) translate(-1020.375 -1023.409)"><path class="solid" transform="scale(2 2)" d="M493.468 226.706C497.887 226.418 502.318 226.338 506.745 226.469C521.527 226.923 536.178 229.376 550.302 233.76C593.986 246.899 613.19 269.402 642.929 300.964L686.298 346.554C666.1 357.107 642.213 367.346 621.334 377.386L457.727 455.545L408.808 479.18C398.945 483.851 384.637 490.032 375.628 495.421C379.911 500.491 386.007 506.526 390.751 511.26C426.545 546.977 461.367 583.877 496.516 620.185C497.185 606.525 496.937 592.311 496.943 578.583L496.969 515.017C512.279 506.27 530.705 497.238 546.417 488.956C578.811 471.686 611.34 454.673 644.004 437.919L697.217 410.235C707.04 405.101 720.675 397.582 730.678 393.341C754.099 421.04 779.601 437.735 793.324 473.024C798.104 485.316 800.877 498.297 801.535 511.469C803.331 543.038 794.197 572.57 773.044 596.321C771.745 597.761 770.416 599.172 769.055 600.554C750.543 619.061 725.397 630.33 698.954 630.133C657.744 629.826 639.636 603.24 613.764 576.624C601.065 563.56 588.33 550.182 575.632 537.194L575.752 652.127C575.711 671.3 576.848 701.451 573.15 719.173C569.971 734.629 563.114 749.092 553.159 761.335C518.704 803.942 458.277 810.394 415.713 775.963C412.707 773.421 410.028 770.472 407.28 767.668C399.391 759.621 391.467 751.608 383.442 743.697C373.448 733.846 363.748 723.697 353.649 713.952C333.443 694.55 313.449 674.929 293.671 655.092C285.019 646.393 275.305 637.29 267.076 628.338C241.165 600.147 225.927 565.814 222.871 527.477C219.675 483.578 233.904 440.187 262.476 406.705C270.746 397.056 280.617 386.986 289.403 377.664L330.899 333.38L364.729 296.998C383.842 276.44 398.961 259.791 424.156 246.502C447.17 234.365 467.642 228.685 493.468 226.706Z"/></g></symbol>
+
+  <!-- Route meters, 56 by 16, still. site.js swaps in live ones that move. -->
+  <symbol id="m-cable" viewBox="0 0 56 16"><path stroke-width="3" d="M3 8h50"/><circle class="solid" cx="3" cy="8" r="2.25"/><circle class="solid" cx="53" cy="8" r="2.25"/></symbol>
+  <symbol id="m-lan" viewBox="0 0 56 16"><path stroke-width="2" d="M3 8h50"/><circle class="solid" cx="3" cy="8" r="2.25"/><circle class="solid" cx="53" cy="8" r="2.25"/></symbol>
+  <symbol id="m-tunnel" viewBox="0 0 56 16"><path stroke-width="1.5" d="M3 8h21.5M31.5 8H53"/><circle stroke-width="1.25" cx="28" cy="8" r="2"/><circle class="solid" cx="3" cy="8" r="2.25"/><circle class="solid" cx="53" cy="8" r="2.25"/></symbol>
+  <symbol id="m-relay" viewBox="0 0 56 16"><path stroke-width="1.25" d="M3 12.75 28 2.5l25 10.25"/><circle class="solid" cx="28" cy="2.5" r="1.9"/><circle class="solid" cx="3" cy="12.75" r="2.25"/><circle class="solid" cx="53" cy="12.75" r="2.25"/></symbol>
+  <symbol id="m-broken" viewBox="0 0 56 16"><path stroke-width="1.25" stroke-dasharray="2.5 3" d="M3 8h50"/><circle stroke-width="1.25" cx="3" cy="8" r="1.85"/><circle stroke-width="1.25" cx="53" cy="8" r="1.85"/></symbol>
+</svg>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<!-- The window's title bar. -->
+<header class="titlebar">
+  <a class="brand" href="#top" aria-label="Pravera, back to top">
+    <svg class="mark" aria-hidden="true"><use href="#i-mark"/></svg>
+    <span>Pravera</span>
+  </a>
+  <div class="titlebar-end">
+    <!-- Likes appear once /api/likes answers; on a host without it they stay hidden. -->
+    <button type="button" class="btn btn-sm btn-quiet" data-like aria-pressed="false" aria-label="Like Pravera" hidden>
+      <svg class="ico" aria-hidden="true"><use href="#i-heart"/></svg>
+      <span class="btn-meta" data-like-count>0</span>
+    </button>
+    <a class="btn btn-sm btn-quiet btn-icon" href="https://github.com/n1ssyyy/Pravera" aria-label="Pravera on GitHub">
+      <svg class="ico" aria-hidden="true"><use href="#i-github"/></svg>
+    </a>
+    <a class="btn btn-sm btn-primary" href="#download">
+      <svg class="ico" aria-hidden="true"><use href="#i-download"/></svg>
+      <span>Download</span>
+      <span class="btn-meta" data-version>v0.1.3</span>
+    </a>
+  </div>
+</header>
+
+<!-- The rail: one entry per sheet. One highlight slides to the sheet on screen. -->
+<nav class="rail" aria-label="Sections">
+  <span class="rail-thumb" aria-hidden="true"></span>
+  <a class="rail-item" href="#devices"><svg class="ico" aria-hidden="true"><use href="#i-devices"/></svg><span>Devices</span></a>
+  <a class="rail-item" href="#routes"><svg class="ico" aria-hidden="true"><use href="#i-relay"/></svg><span>Routes</span></a>
+  <a class="rail-item" href="#host"><svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg><span>Host</span></a>
+  <a class="rail-item" href="#features"><svg class="ico" aria-hidden="true"><use href="#i-grid"/></svg><span>Features</span></a>
+  <a class="rail-item" href="#compare"><svg class="ico" aria-hidden="true"><use href="#i-transfers"/></svg><span>Compare</span></a>
+  <a class="rail-item" href="#versions"><svg class="ico" aria-hidden="true"><use href="#i-history"/></svg><span>Versions</span></a>
+  <a class="rail-item" href="#download"><svg class="ico" aria-hidden="true"><use href="#i-download"/></svg><span>Download</span></a>
+</nav>
+
+<main id="main" class="floor">
+
+  <!-- ============================ HERO ============================ -->
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="label arrive" style="--i:0">Open-source remote desktop · free · MIT or Apache-2.0</p>
+      <h1 class="hero-title arrive" style="--i:1">Stop routing your screen through <span class="quiet">someone else's cloud.</span></h1>
+      <p class="hero-sub arrive" style="--i:2">
+        A cable on your desk, the same Wi-Fi, a tailnet, a hole punched straight through two NATs.
+        Pravera tries every route it knows, puts your session on the quickest one and draws that route live,
+        so you always know why it feels the way it does.
+      </p>
+      <div class="hero-cta arrive" style="--i:3">
+        <a class="btn btn-lg btn-primary" href="#download" data-dl-main>
+          <svg class="ico" aria-hidden="true"><use href="#i-download"/></svg>
+          <span data-dl-label>Download Pravera</span>
+        </a>
+        <a class="btn btn-lg" href="https://github.com/n1ssyyy/Pravera">
+          <svg class="ico" aria-hidden="true"><use href="#i-github"/></svg>
+          <span>Source</span>
+        </a>
+        <p class="fine hero-meta"><span data-dl-meta><span data-version>v0.1.3</span> · Windows, macOS, Linux</span></p>
+      </div>
+    </div>
+
+    <!-- The headline, drawn: the path leaves someone else's cloud and goes straight. -->
+    <figure class="path arrive" style="--i:2" id="hero-path" data-route="cable" role="img" aria-label="A route diagram. The path between two machines first detours through a relay in someone else's cloud, then straightens into a direct link.">
+      <p class="path-cloud label" aria-hidden="true">someone else's cloud</p>
+      <svg class="path-draw" viewBox="0 0 560 120" aria-hidden="true"><use href="#m-cable"/></svg>
+      <div class="path-ends" aria-hidden="true">
+        <span class="label">Your machine</span>
+        <span class="route-state"><b data-route-name>Direct</b> <span data-route-note>the bits go straight there</span></span>
+        <span class="label">The far machine</span>
+      </div>
+    </figure>
+  </section>
+
+  <!-- What it is not. -->
+  <ul class="nos" aria-label="What Pravera does without">
+    <li><b>No</b> vendor account</li>
+    <li><b>No</b> monthly seat</li>
+    <li><b>No</b> "commercial use detected"</li>
+    <li><b>No</b> mystery lag</li>
+  </ul>
+
+  <!-- ============================ DEVICES ============================ -->
+  <section class="sheet" id="devices" aria-labelledby="devices-t" data-reveal>
+    <header class="sheet-head">
+      <h2 class="sheet-title" id="devices-t">Devices</h2>
+      <p class="sheet-glance figures"><span><b id="dev-online">3</b> online</span><i aria-hidden="true"></i><span><b id="dev-offline">2</b> offline</span></p>
+      <div class="sheet-actions">
+        <span class="tag">Demo</span>
+        <button type="button" class="btn btn-sm" id="dev-scan"><svg class="ico" aria-hidden="true"><use href="#i-scan"/></svg><span>Scan</span></button>
+      </div>
+    </header>
+    <div class="sheet-body" role="img" aria-label="A demo of Pravera's device list. Each machine has a small drawing of how it is reached: a heavy bar for a cable, a line for the local network, a line through a midpoint for a direct tunnel, a detour through a third node for a relay, a broken line when offline. The drawings change as the network does.">
+      <div class="devices" id="dev-list" aria-hidden="true">
+        <p class="label group">Online</p>
+        <div class="device" data-device="studio" data-route="cable">
+          <svg class="ico" aria-hidden="true"><use href="#i-devices"/></svg>
+          <span class="device-name">studio-pc</span>
+          <span class="device-os">Windows</span>
+          <span class="device-addr">169.254.18.2</span>
+          <svg class="meter" data-meter aria-hidden="true"><use href="#m-cable"/></svg>
+          <span class="device-route" data-label>USB4 on Ethernet 2</span>
+        </div>
+        <div class="device" data-device="homelab" data-route="lan">
+          <svg class="ico" aria-hidden="true"><use href="#i-devices"/></svg>
+          <span class="device-name">homelab</span>
+          <span class="device-os">Windows</span>
+          <span class="device-addr">192.168.1.40</span>
+          <svg class="meter" data-meter aria-hidden="true"><use href="#m-lan"/></svg>
+          <span class="device-route" data-label>Local network</span>
+        </div>
+        <div class="device" data-device="thinkpad" data-route="tunnel">
+          <svg class="ico" aria-hidden="true"><use href="#i-devices"/></svg>
+          <span class="device-name">thinkpad</span>
+          <span class="device-os">Linux</span>
+          <span class="device-addr">100.64.0.7</span>
+          <svg class="meter" data-meter aria-hidden="true"><use href="#m-tunnel"/></svg>
+          <span class="device-route" data-label>Tailscale, direct</span>
+        </div>
+        <p class="label group">Offline</p>
+        <div class="device" data-device="nas" data-route="broken">
+          <svg class="ico" aria-hidden="true"><use href="#i-devices"/></svg>
+          <span class="device-name">media-box</span>
+          <span class="device-os">Linux</span>
+          <span class="device-addr">100.64.0.12</span>
+          <svg class="meter" data-meter aria-hidden="true"><use href="#m-broken"/></svg>
+          <span class="device-route" data-label>Offline</span>
+        </div>
+        <div class="device" data-device="attic" data-route="broken">
+          <svg class="ico" aria-hidden="true"><use href="#i-devices"/></svg>
+          <span class="device-name">attic-pc</span>
+          <span class="device-os">Windows</span>
+          <span class="device-addr">192.168.1.52</span>
+          <svg class="meter" data-meter aria-hidden="true"><use href="#m-broken"/></svg>
+          <span class="device-route" data-label>Offline</span>
+        </div>
+      </div>
+    </div>
+    <footer class="sheet-foot" aria-hidden="true">
+      <div class="ledger-head">
+        <p class="label">Discovery</p>
+        <p class="fine"><span id="disc-live">4</span> of 4 live</p>
+        <p class="fine event" id="dev-event"></p>
+      </div>
+      <ul class="sources">
+        <li data-source="cable" class="live"><svg class="ico"><use href="#i-cable"/></svg><span>Direct link</span><em>USB4 on Ethernet 2</em></li>
+        <li data-source="lan" class="live"><svg class="ico"><use href="#i-wireless"/></svg><span>Local network</span><em>192.168.1.0/24</em></li>
+        <li data-source="tailnet" class="live"><svg class="ico"><use href="#i-relay"/></svg><span>Tailscale</span><em>example.ts.net</em></li>
+        <li data-source="internet" class="live"><svg class="ico"><use href="#i-globe"/></svg><span>Internet</span><em>ready to punch through</em></li>
+      </ul>
+    </footer>
+  </section>
+
+  <!-- ============================ ROUTES ============================ -->
+  <section class="sheet" id="routes" aria-labelledby="routes-t" data-reveal>
+    <header class="sheet-head">
+      <h2 class="sheet-title" id="routes-t">Routes</h2>
+      <p class="sheet-glance">Five ways there. The fastest one that works carries the session.</p>
+      <div class="sheet-actions">
+        <button type="button" class="btn btn-sm" id="route-reset" hidden>Plug everything back in</button>
+      </div>
+    </header>
+    <div class="sheet-body split">
+      <div class="pane">
+        <figure class="path path-wide" id="route-path" data-route="cable">
+          <p class="path-cloud label" aria-hidden="true">a relay</p>
+          <svg class="path-draw" viewBox="0 0 560 120" aria-hidden="true"><use href="#m-cable"/></svg>
+          <div class="path-ends" aria-hidden="true">
+            <span class="label">Your machine</span>
+            <span class="route-state" role="status" aria-live="polite"><b data-route-name>Cable</b> <span data-route-note>carries the session</span></span>
+            <span class="label">The far machine</span>
+          </div>
+        </figure>
+        <p class="pane-note">Take a route away and watch the session fall to the next one. That is what Pravera does when a cable is pulled or a network drops, with the session still open.</p>
+      </div>
+      <ol class="ladder pane" id="ladder">
+        <li class="rung" data-rung="cable">
+          <svg class="meter" data-meter aria-hidden="true"><use href="#m-cable"/></svg>
+          <div><h3>Cable</h3><p>Thunderbolt, USB4 or Ethernet between two machines. Beats any Wi-Fi.</p></div>
+          <span class="rung-state fine" data-state>in use</span>
+          <button type="button" class="switch" role="switch" aria-checked="true" aria-label="Cable available"><span></span></button>
+        </li>
+        <li class="rung" data-rung="lan">
+          <svg class="meter" data-meter aria-hidden="true"><use href="#m-lan"/></svg>
+          <div><h3>Subnet</h3><p>Both machines on the same network, found on their own.</p></div>
+          <span class="rung-state fine" data-state>standing by</span>
+          <button type="button" class="switch" role="switch" aria-checked="true" aria-label="Subnet available"><span></span></button>
+        </li>
+        <li class="rung" data-rung="tailnet">
+          <svg class="meter" data-meter aria-hidden="true"><use href="#m-tunnel"/></svg>
+          <div><h3>Tailnet</h3><p>A WireGuard tunnel you already run. Direct, but wrapped.</p></div>
+          <span class="rung-state fine" data-state>standing by</span>
+          <button type="button" class="switch" role="switch" aria-checked="true" aria-label="Tailnet available"><span></span></button>
+        </li>
+        <li class="rung" data-rung="punch">
+          <svg class="meter" data-meter aria-hidden="true"><use href="#m-tunnel"/></svg>
+          <div><h3>Hole punch</h3><p>Straight through two NATs across the internet. No port forwarding.</p></div>
+          <span class="rung-state fine" data-state>standing by</span>
+          <button type="button" class="switch" role="switch" aria-checked="true" aria-label="Hole punch available"><span></span></button>
+        </li>
+        <li class="rung" data-rung="relay">
+          <svg class="meter" data-meter aria-hidden="true"><use href="#m-relay"/></svg>
+          <div><h3>Relay</h3><p>The last resort. Still end-to-end encrypted, measurably slower, and the meter says so.</p></div>
+          <span class="rung-state fine" data-state>standing by</span>
+          <button type="button" class="switch" role="switch" aria-checked="true" aria-label="Relay available"><span></span></button>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============================ HOST ============================ -->
+  <section class="sheet" id="host" aria-labelledby="host-t" data-reveal>
+    <header class="sheet-head">
+      <h2 class="sheet-title" id="host-t">Host</h2>
+      <p class="sheet-glance">The machine you connect to decides who gets in, and what they may do there.</p>
+    </header>
+    <div class="sheet-body split">
+      <div class="pane">
+        <div class="pane-head">
+          <p class="label">Role</p>
+          <div class="seg" id="roles" role="group" aria-label="Role">
+            <span class="seg-thumb" aria-hidden="true"></span>
+            <button type="button" data-role="viewer" aria-pressed="false">viewer</button>
+            <button type="button" data-role="operator" aria-pressed="true">operator</button>
+            <button type="button" data-role="admin" aria-pressed="false">admin</button>
+          </div>
+        </div>
+        <ul class="grants" id="grants">
+          <li><span>View screen</span><button type="button" class="switch" role="switch" data-grant="view" aria-checked="true" aria-label="View screen"><span></span></button></li>
+          <li><span>Mouse and keyboard</span><button type="button" class="switch" role="switch" data-grant="control" aria-checked="true" aria-label="Mouse and keyboard"><span></span></button></li>
+          <li><span>Read clipboard</span><button type="button" class="switch" role="switch" data-grant="clip-read" aria-checked="true" aria-label="Read clipboard"><span></span></button></li>
+          <li><span>Write clipboard</span><button type="button" class="switch" role="switch" data-grant="clip-write" aria-checked="true" aria-label="Write clipboard"><span></span></button></li>
+          <li><span>Download files</span><button type="button" class="switch" role="switch" data-grant="file-read" aria-checked="false" aria-label="Download files"><span></span></button></li>
+          <li><span>Upload files</span><button type="button" class="switch" role="switch" data-grant="file-write" aria-checked="false" aria-label="Upload files"><span></span></button></li>
+          <li><span>Hear audio</span><button type="button" class="switch" role="switch" data-grant="audio" aria-checked="true" aria-label="Hear audio"><span></span></button></li>
+          <li><span>Switch displays</span><button type="button" class="switch" role="switch" data-grant="displays" aria-checked="true" aria-label="Switch displays"><span></span></button></li>
+          <li><span>Approve UAC prompts</span><button type="button" class="switch" role="switch" data-grant="elevate" aria-checked="false" aria-label="Approve UAC prompts"><span></span></button></li>
+          <li><span>Manage users</span><button type="button" class="switch" role="switch" data-grant="admin" aria-checked="false" aria-label="Manage users"><span></span></button></li>
+        </ul>
+        <p class="pane-note" id="grant-note" role="status" aria-live="polite">The built-in operator role: everyday remote use, without file transfer, elevation or user management.</p>
+      </div>
+      <div class="pane">
+        <div class="pane-head">
+          <p class="label">Terminal on homelab</p>
+          <span class="tag">Demo</span>
+        </div>
+        <!-- site.js types this out once it scrolls into view; this is the finished transcript. -->
+        <div class="term" id="term" aria-hidden="true"><p><span class="term-ps">PS C:\Users\you&gt;</span> hostname</p><p class="term-out">homelab</p><p><span class="term-ps">PS C:\Users\you&gt;</span> whoami</p><p class="term-out">homelab\you</p><p><span class="term-ps">PS C:\Users\you&gt;</span> <span class="caret"></span></p></div>
+        <p class="pane-note">A real shell on the far machine, over the same encrypted connection as the picture. Accounts live on the host and passwords are hashed with Argon2id; the client is trusted with nothing the host did not grant.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ FEATURES ============================ -->
+  <section class="sheet" id="features" aria-labelledby="features-t" data-reveal>
+    <header class="sheet-head">
+      <h2 class="sheet-title" id="features-t">Features</h2>
+      <p class="sheet-glance">One executable: the app, the host, the service, the installer and the updater.</p>
+    </header>
+    <ul class="sheet-body facts">
+      <li><svg class="ico" aria-hidden="true"><use href="#i-bolt"/></svg><h3>Pixels that keep up</h3><p>Hardware H.264 when the GPU offers it, a software encoder when it doesn't. A lost packet costs one frame, not a frozen picture.</p></li>
+      <li><svg class="ico" aria-hidden="true"><use href="#i-keyboard"/></svg><h3>Input at your mouse's own rate</h3><p>Raw, uncoalesced input. Alt+F4, the Win key and the other system chords land on the far machine, not yours.</p></li>
+      <li><svg class="ico" aria-hidden="true"><use href="#i-speaker"/></svg><h3>Everything on one connection</h3><p>System audio, a clipboard that arrives as you copy, and files that drag straight into a live session.</p></li>
+      <li><svg class="ico" aria-hidden="true"><use href="#i-sidebar"/></svg><h3>Several machines, one window</h3><p>Each session is a tab. So is each remote terminal.</p></li>
+      <li><svg class="ico" aria-hidden="true"><use href="#i-lock"/></svg><h3>Reach a machine nobody is sitting at</h3><p>A Windows service starts Pravera before anyone signs in. Ctrl+Alt+Del, UAC prompts and the lock screen all work.</p></li>
+      <li><svg class="ico" aria-hidden="true"><use href="#i-devices"/></svg><h3>No monitor, no problem</h3><p>A bundled virtual display driver gives a headless box a real 1920×1080 screen to host.</p></li>
+      <li><svg class="ico" aria-hidden="true"><use href="#i-agent"/></svg><h3>Let an AI agent drive</h3><p>One switch opens a loopback-only MCP tool bus: pointer, keyboard, clipboard, files. Off by default, every tool listed on screen.</p></li>
+      <li><svg class="ico" aria-hidden="true"><use href="#i-gamepad"/></svg><h3>Gaming mode</h3><p>Fullscreen on the far monitor, cursor locked to the window, system chords captured instead of stolen.</p></li>
+      <li><svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg><h3>Encrypted end to end</h3><p>QUIC between your two machines. When a relay has to carry the session, it carries ciphertext.</p></li>
+      <li><svg class="ico" aria-hidden="true"><use href="#i-history"/></svg><h3>Keeps itself current</h3><p>Checks for a release every few hours, verifies its SHA-256 and swaps itself in only when nobody is connected.</p></li>
+    </ul>
+  </section>
+
+  <!-- ============================ COMPARE ============================ -->
+  <section class="sheet" id="compare" aria-labelledby="compare-t" data-reveal>
+    <header class="sheet-head">
+      <h2 class="sheet-title" id="compare-t">Compare</h2>
+      <p class="sheet-glance">The big remote desktops broker every session through their servers and never say which way your pixels went.</p>
+    </header>
+    <div class="sheet-body cmp-scroll" tabindex="0" role="region" aria-labelledby="compare-t">
+      <table class="cmp">
+        <thead>
+          <tr><th scope="col"><span class="sr">What</span></th><th scope="col" class="us">Pravera</th><th scope="col">TeamViewer</th><th scope="col">AnyDesk</th><th scope="col">RustDesk</th><th scope="col">Parsec</th><th scope="col">Chrome RD</th><th scope="col">Windows RDP</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Price</th><td class="us"><b>Free</b></td><td>about $24.90 / mo, billed yearly</td><td>from €19.90 / mo, billed yearly</td><td>free, Pro $11.88 / mo</td><td>free, Warp $8.33 / mo</td><td>free</td><td>in Windows Pro</td></tr>
+          <tr><th scope="row">Free for work use</th><td class="us y">yes</td><td class="n">personal only, "commercial use suspected"</td><td class="n">personal only</td><td class="y">yes</td><td class="n">Teams from $30 / mo</td><td class="y">yes</td><td class="y">yes</td></tr>
+          <tr><th scope="row">Open source</th><td class="us y">MIT or Apache-2.0</td><td class="n">no</td><td class="n">no</td><td class="y">AGPL-3.0</td><td class="n">no</td><td class="n">no</td><td class="n">no</td></tr>
+          <tr><th scope="row">Vendor account required</th><td class="us y">no</td><td class="n">yes</td><td class="u">unverified</td><td class="y">no</td><td class="n">yes</td><td class="n">yes, Google</td><td class="y">no</td></tr>
+          <tr><th scope="row">Across the internet, no port forwarding</th><td class="us y">yes</td><td class="y">yes</td><td class="y">yes</td><td class="y">yes</td><td class="y">yes</td><td class="y">yes</td><td class="n">needs a VPN or RD Gateway</td></tr>
+          <tr><th scope="row">Shows you the route it took</th><td class="us y">live, every hop</td><td class="u">not offered</td><td class="u">not offered</td><td class="u">not offered</td><td class="u">not offered</td><td class="u">not offered</td><td class="u">not offered</td></tr>
+          <tr><th scope="row">Reach a PC before anyone signs in</th><td class="us y">yes, free</td><td class="y">yes</td><td class="y">yes</td><td class="y">yes</td><td class="y">yes</td><td class="u">unverified</td><td class="y">Pro hosts only</td></tr>
+          <tr><th scope="row">Can be hosted on</th><td class="us">Windows</td><td>Windows, macOS, Linux</td><td>Windows, macOS, Linux</td><td>Windows, macOS, Linux</td><td>Windows, macOS</td><td>Windows, macOS, Linux</td><td>Windows Pro or Enterprise</td></tr>
+          <tr><th scope="row">AI agent control (MCP)</th><td class="us y">opt-in, loopback only</td><td class="u">not offered</td><td class="u">not offered</td><td class="u">not offered</td><td class="u">not offered</td><td class="u">not offered</td><td class="u">not offered</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <footer class="sheet-foot">
+      <p class="fine">From the official pricing pages and docs on 29 Sep 2026:
+        <a class="link" href="https://www.teamviewer.com/en/global/support/knowledge-base/teamviewer-classic/licensing/personal-use/commercial-use-suspected/">TeamViewer</a> (the price is a third-party figure; the official page would not render it),
+        <a class="link" href="https://anydesk.com/en/pricing">AnyDesk</a> (EU pricing, before VAT),
+        <a class="link" href="https://rustdesk.com/pricing">RustDesk</a>,
+        <a class="link" href="https://parsec.app/pricing">Parsec</a>,
+        <a class="link" href="https://support.google.com/chrome/answer/1649523">Chrome Remote Desktop</a>,
+        <a class="link" href="https://learn.microsoft.com/en-us/windows-server/remote/remote-desktop-services/remotepc/remote-desktop-supported-config">RDP</a> (Windows Home cannot host).
+        "Not offered" also covers not documented. To punch through NATs, and as a last resort, Pravera uses <a class="link" href="https://github.com/n0-computer/iroh">iroh</a>'s public relays; the session is end-to-end encrypted either way.
+        Out of date? <a class="link" href="https://github.com/n1ssyyy/Pravera/issues">Open an issue</a>.</p>
+    </footer>
+  </section>
+
+  <!-- ============================ VERSIONS ============================ -->
+  <section class="sheet" id="versions" aria-labelledby="versions-t" data-reveal>
+    <header class="sheet-head">
+      <h2 class="sheet-title" id="versions-t">Versions</h2>
+      <p class="sheet-glance">Every release, newest first, straight from GitHub. Once installed, Pravera updates itself.</p>
+    </header>
+    <div class="sheet-body split split-side">
+      <div class="pane rel-latest" id="rel-latest">
+        <p class="label">Latest</p>
+        <p class="rel-tag" id="rel-tag">v0.1.3</p>
+        <p class="fine" id="rel-date">30 Sep 2026</p>
+        <ul class="rel-files" id="rel-files">
+          <li><span>Windows</span><em data-size="win">39.8 MB</em></li>
+          <li><span>macOS</span><em data-size="mac">15.0 MB</em></li>
+          <li><span>Linux</span><em data-size="linux">19.0 MB</em></li>
+        </ul>
+        <div class="rel-actions">
+          <a class="btn btn-primary" href="https://github.com/n1ssyyy/Pravera/releases/latest" data-dl-main>
+            <svg class="ico" aria-hidden="true"><use href="#i-download"/></svg><span data-dl-label>Download Pravera</span>
+          </a>
+          <a class="btn" id="rel-notes-link" href="https://github.com/n1ssyyy/Pravera/releases/latest">
+            <span>Release notes</span><svg class="ico" aria-hidden="true"><use href="#i-out"/></svg>
+          </a>
+        </div>
+      </div>
+      <div class="pane">
+        <p class="fine rel-status" id="rel-status" role="status" hidden></p>
+        <ol class="rel-list" id="rel-list">
+          <li class="rel"><a href="https://github.com/n1ssyyy/Pravera/releases"><b>All</b><span>Open the release list on GitHub</span><svg class="ico" aria-hidden="true"><use href="#i-out"/></svg></a></li>
+        </ol>
+        <button type="button" class="btn btn-sm rel-more" id="rel-more" hidden>
+          <span id="rel-more-label">Show older versions</span>
+          <svg class="ico" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ DOWNLOAD ============================ -->
+  <section class="sheet" id="download" aria-labelledby="download-t" data-reveal>
+    <header class="sheet-head">
+      <h2 class="sheet-title" id="download-t">Download</h2>
+      <p class="sheet-glance">One file with the whole app inside. Installs for your user only and never asks for admin.</p>
+    </header>
+    <div class="sheet-body plats">
+      <a class="plat" data-plat="win" href="https://github.com/n1ssyyy/Pravera/releases/latest/download/Pravera-Setup-Windows-x64.exe">
+        <span class="plat-top"><span class="label">x64</span><span class="tag tag-solid plat-you" hidden>Your system</span></span>
+        <span class="plat-name">Windows</span>
+        <span class="plat-role">Connect and host</span>
+        <span class="fine">Windows 10 and 11</span>
+        <span class="fine plat-file">Pravera-Setup-Windows-x64.exe</span>
+        <span class="btn plat-go"><svg class="ico" aria-hidden="true"><use href="#i-download"/></svg><span>Download</span><span class="btn-meta" data-size="win">39.8 MB</span></span>
+      </a>
+      <a class="plat" data-plat="mac" href="https://github.com/n1ssyyy/Pravera/releases/latest/download/Pravera-Setup-macOS-arm64.zip">
+        <span class="plat-top"><span class="label">Apple Silicon</span><span class="tag tag-solid plat-you" hidden>Your system</span></span>
+        <span class="plat-name">macOS</span>
+        <span class="plat-role">Connect</span>
+        <span class="fine">Unzip, then open Pravera Setup</span>
+        <span class="fine plat-file">Pravera-Setup-macOS-arm64.zip</span>
+        <span class="btn plat-go"><svg class="ico" aria-hidden="true"><use href="#i-download"/></svg><span>Download</span><span class="btn-meta" data-size="mac">15.0 MB</span></span>
+      </a>
+      <a class="plat" data-plat="linux" href="https://github.com/n1ssyyy/Pravera/releases/latest/download/Pravera-Setup-Linux-x86_64.AppImage">
+        <span class="plat-top"><span class="label">x86_64</span><span class="tag tag-solid plat-you" hidden>Your system</span></span>
+        <span class="plat-name">Linux</span>
+        <span class="plat-role">Connect</span>
+        <span class="fine">Ubuntu 22.04+, Fedora 36+, Debian 12+</span>
+        <span class="fine plat-file">Pravera-Setup-Linux-x86_64.AppImage</span>
+        <span class="btn plat-go"><svg class="ico" aria-hidden="true"><use href="#i-download"/></svg><span>Download</span><span class="btn-meta" data-size="linux">19.0 MB</span></span>
+      </a>
+    </div>
+    <footer class="sheet-foot notes">
+      <p class="fine"><b>Not code-signed yet.</b> On Windows choose <b>More info</b>, then <b>Run anyway</b>. On macOS unzip, open <b>Pravera Setup</b>, then <b>System Settings</b>, <b>Privacy &amp; Security</b>, <b>Open Anyway</b>. On Linux run <code>chmod +x</code> on the AppImage first; with no FUSE, add <code>--appimage-extract-and-run</code>.</p>
+      <p class="fine"><b>Not done yet.</b> Hosting is Windows-only today: macOS and Linux connect but cannot be reached. Run the same Setup again any time to update, repair or uninstall.</p>
+      <div class="like-row" data-like-row hidden>
+        <button type="button" class="btn" data-like aria-pressed="false">
+          <svg class="ico" aria-hidden="true"><use href="#i-heart"/></svg>
+          <span data-like-label>Like Pravera</span>
+          <span class="btn-meta" data-like-count>0</span>
+        </button>
+        <p class="fine like-msg" data-like-msg role="status" aria-live="polite"></p>
+      </div>
+    </footer>
+  </section>
+
+  <footer class="foot">
+    <p class="foot-brand"><svg class="mark" aria-hidden="true"><use href="#i-mark"/></svg> Pravera <span>MIT or Apache-2.0. Fork it, ship it, host it. Your screen stays between your machines.</span></p>
+    <nav class="foot-nav" aria-label="Project links">
+      <a class="link" href="https://github.com/n1ssyyy/Pravera">Source</a>
+      <a class="link" href="https://github.com/n1ssyyy/Pravera/releases">Releases</a>
+      <a class="link" href="https://github.com/n1ssyyy/Pravera/issues">Report a problem</a>
+    </nav>
+    <p class="fine">Developed by <a class="link" href="https://github.com/n1ssyyy">n1ssyyy</a>. Built on iced, wgpu, iroh and OpenH264.</p>
+  </footer>
+</main>
+
+<script src="site.js" defer onerror="document.documentElement.classList.remove('js')"></script>
+</body>
+</html>

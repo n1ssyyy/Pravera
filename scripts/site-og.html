@@ -1,0 +1,149 @@
+<!doctype html>
+<!-- The share image for the homepage (site/og.png, 1200 by 630).
+     Render it with a headless Chrome:
+
+       chrome --headless=new --hide-scrollbars --force-device-scale-factor=1
+              --window-size=1200,630 --screenshot=site/og.png scripts/site-og.html
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pravera share image</title>
+<style>
+@font-face {
+    font-family: 'JetBrains Mono';
+    src: url('../site/fonts/JetBrainsMono-Variable.ttf') format('truetype');
+    font-weight: 100 800;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+}
+
+body {
+    width: 1200px;
+    height: 630px;
+    overflow: hidden;
+    background: #0a0a0a;
+    color: #f2f2f2;
+    font: 400 20px/1.5 'JetBrains Mono', monospace;
+    font-variant-ligatures: none;
+}
+
+.sheet {
+    position: absolute;
+    inset: 28px;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    border: 1px solid #262626;
+    border-top-color: #373737;
+    border-bottom-color: #0a0a0a;
+    border-radius: 16px;
+    background: #0f0f0f;
+    overflow: hidden;
+}
+
+header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    height: 76px;
+    padding: 0 40px;
+    border-bottom: 1px solid #292929;
+    font-size: 24px;
+    font-weight: 600;
+}
+
+header svg {
+    width: 34px;
+    height: 34px;
+}
+
+header span {
+    margin-left: auto;
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #7c7c7c;
+}
+
+main {
+    display: grid;
+    align-content: center;
+    gap: 30px;
+    padding: 0 40px;
+}
+
+h1 {
+    font-size: 58px;
+    font-weight: 600;
+    line-height: 1.1;
+    letter-spacing: -0.035em;
+}
+
+h1 em {
+    font-style: normal;
+    color: #7c7c7c;
+}
+
+.route {
+    display: block;
+    width: 100%;
+    height: 76px;
+}
+
+footer {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    border-top: 1px solid #292929;
+    font-size: 17px;
+    color: #a8a8a8;
+}
+
+footer p {
+    padding: 18px 0 18px 24px;
+    border-left: 1px solid #292929;
+    white-space: nowrap;
+}
+
+footer p:first-child {
+    padding-left: 40px;
+    border-left: 0;
+}
+
+footer b {
+    color: #f2f2f2;
+    font-weight: 600;
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+  <header>
+    <svg viewBox="14 14 36 36" aria-hidden="true"><g transform="translate(32 32) scale(0.028) translate(-1020.375 -1023.409)"><path fill="#ececec" transform="scale(2 2)" d="M493.468 226.706C497.887 226.418 502.318 226.338 506.745 226.469C521.527 226.923 536.178 229.376 550.302 233.76C593.986 246.899 613.19 269.402 642.929 300.964L686.298 346.554C666.1 357.107 642.213 367.346 621.334 377.386L457.727 455.545L408.808 479.18C398.945 483.851 384.637 490.032 375.628 495.421C379.911 500.491 386.007 506.526 390.751 511.26C426.545 546.977 461.367 583.877 496.516 620.185C497.185 606.525 496.937 592.311 496.943 578.583L496.969 515.017C512.279 506.27 530.705 497.238 546.417 488.956C578.811 471.686 611.34 454.673 644.004 437.919L697.217 410.235C707.04 405.101 720.675 397.582 730.678 393.341C754.099 421.04 779.601 437.735 793.324 473.024C798.104 485.316 800.877 498.297 801.535 511.469C803.331 543.038 794.197 572.57 773.044 596.321C771.745 597.761 770.416 599.172 769.055 600.554C750.543 619.061 725.397 630.33 698.954 630.133C657.744 629.826 639.636 603.24 613.764 576.624C601.065 563.56 588.33 550.182 575.632 537.194L575.752 652.127C575.711 671.3 576.848 701.451 573.15 719.173C569.971 734.629 563.114 749.092 553.159 761.335C518.704 803.942 458.277 810.394 415.713 775.963C412.707 773.421 410.028 770.472 407.28 767.668C399.391 759.621 391.467 751.608 383.442 743.697C373.448 733.846 363.748 723.697 353.649 713.952C333.443 694.55 313.449 674.929 293.671 655.092C285.019 646.393 275.305 637.29 267.076 628.338C241.165 600.147 225.927 565.814 222.871 527.477C219.675 483.578 233.904 440.187 262.476 406.705C270.746 397.056 280.617 386.986 289.403 377.664L330.899 333.38L364.729 296.998C383.842 276.44 398.961 259.791 424.156 246.502C447.17 234.365 467.642 228.685 493.468 226.706Z"/></g></svg>
+    Pravera
+    <span>Open-source remote desktop</span>
+  </header>
+  <main>
+    <h1>Stop routing your screen through <em>someone else's cloud.</em></h1>
+    <!-- The route, drawn the way the app's meter draws it: the detour through
+         a relay left behind, the direct link carrying the session. -->
+    <svg class="route" viewBox="0 0 1062 76" fill="none" aria-hidden="true">
+      <path d="M12 60 531 10l519 50" stroke="#525252" stroke-width="2.5" stroke-dasharray="6 8" stroke-linejoin="round"/>
+      <circle cx="531" cy="10" r="6" fill="#0f0f0f" stroke="#525252" stroke-width="2.5"/>
+      <path d="M12 60h1038" stroke="#00bc7d" stroke-width="11"/>
+      <circle cx="12" cy="60" r="10" fill="#00bc7d"/>
+      <circle cx="1050" cy="60" r="10" fill="#00bc7d"/>
+    </svg>
+  </main>
+  <footer>
+    <p><b>No</b> vendor account</p>
+    <p><b>No</b> monthly seat</p>
+    <p><b>No</b> middleman</p>
+    <p><b>Free</b> and open source</p>
+  </footer>
+</div>
+</body>
+</html>

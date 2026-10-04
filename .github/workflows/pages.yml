@@ -1,0 +1,55 @@
+name: Pages redirect
+
+# GitHub Pages for this repo is a single page that forwards to the real
+# homepage on Vercel. The address comes from the repository variable
+# SITE_URL (Settings → Secrets and variables → Actions → Variables), so
+# nothing is published until that is set, and changing it is one edit.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - pages/**
+      - .github/workflows/pages.yml
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: vars.SITE_URL != ''
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Point the redirect at the live site
+        env:
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: |
+          case "$SITE_URL" in
+            https://*) ;;
+            *) echo "SITE_URL must start with https://" >&2; exit 1 ;;
+          esac
+          if printf '%s' "$SITE_URL" | grep -q "[^A-Za-z0-9:/._~-]"; then
+            echo "SITE_URL has characters that do not belong in a site address" >&2; exit 1
+          fi
+          mkdir out
+          sed "s|__SITE_URL__|${SITE_URL%/}/|g" pages/index.html > out/index.html
+          cp out/index.html out/404.html
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+      - id: deploy
+        uses: actions/deploy-pages@v4
